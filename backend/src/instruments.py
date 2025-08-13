@@ -592,4 +592,174 @@ class InstrumentSynthesizer:
         """Apply simple reverb effect"""
         
         # Simple delay-based reverb
-        delay1_samples = int(0.03 * self.sample
+        delay1_samples = int(0.03 * self.sample_rate)  # 30ms delay
+        delay2_samples = int(0.07 * self.sample_rate)  # 70ms delay
+        
+        reverb_audio = audio.copy()
+        
+        if len(audio) > delay1_samples:
+            reverb_audio[delay1_samples:] += audio[:-delay1_samples] * 0.3
+        
+        if len(audio) > delay2_samples:
+            reverb_audio[delay2_samples:] += audio[:-delay2_samples] * 0.2
+        
+        return reverb_audio
+    
+    # Helper methods
+    def _get_default_tempo(self, mood: str) -> float:
+        """Get default tempo based on mood"""
+        tempo_map = {
+            'peaceful': 70,
+            'joyful': 120,
+            'romantic': 80,
+            'devotional': 60,
+            'energetic': 140,
+            'melancholic': 65
+        }
+        return tempo_map.get(mood, 90)
+    
+    def _get_rhythm_pattern(self, instrument: str, genre: str, mood: str) -> List[float]:
+        """Get traditional rhythm patterns for instruments"""
+        
+        patterns = {
+            'tabla': {
+                'classical': [1, 0, 0.5, 0, 1, 0, 0.5, 0],
+                'folk': [1, 0.5, 1, 0.5, 1, 0.5],
+                'devotional': [1, 0, 0, 1, 0, 0],
+                'contemporary': [1, 0, 1, 0, 1, 0, 1, 0]
+            },
+            'mridangam': {
+                'classical': [1, 0, 0.3, 0.7, 0, 0.5, 0.8, 0],
+                'carnatic': [1, 0.3, 0.5, 0.3, 1, 0.5, 0.3, 0.8],
+                'devotional': [1, 0, 0.5, 0, 0.8, 0, 0.3, 0]
+            },
+            'thavil': {
+                'folk': [1, 0.8, 0, 1, 0.6, 0, 1, 0],
+                'devotional': [1, 0, 0.9, 0, 1, 0.7, 0, 0.5],
+                'classical': [1, 0.4, 0.6, 0.4, 1, 0.6, 0.4, 0.8]
+            }
+        }
+        
+        # Get pattern for instrument and genre
+        instrument_patterns = patterns.get(instrument, {})
+        pattern = instrument_patterns.get(genre, [1, 0, 1, 0])
+        
+        # Adjust pattern based on mood
+        if mood == 'energetic':
+            pattern = [p * 1.2 if p > 0 else p for p in pattern]
+        elif mood == 'peaceful':
+            pattern = [p * 0.8 if p > 0 else p for p in pattern]
+        
+        return pattern
+    
+    def _get_raga_scale(self, mood: str) -> List[float]:
+        """Get raga scale frequencies based on mood"""
+        scales = {
+            'peaceful': [261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88],  # Shankarabharanam
+            'joyful': [261.63, 293.66, 329.63, 369.99, 392.00, 440.00, 493.88],    # Kalyani
+            'romantic': [261.63, 293.66, 329.63, 392.00, 440.00],                  # Mohanam
+            'devotional': [261.63, 277.18, 311.13, 349.23, 392.00, 415.30, 466.16], # Bhairavi
+            'energetic': [261.63, 277.18, 329.63, 349.23, 392.00, 415.30, 493.88],   # Kharaharapriya
+            'melancholic': [261.63, 277.18, 311.13, 349.23, 392.00, 415.30, 466.16]  # Sahana
+        }
+        return scales.get(mood, scales['peaceful'])
+    
+    def _adapt_to_instrument_range(self, frequencies: List[float], profile: Dict) -> List[float]:
+        """Adapt frequencies to instrument range"""
+        adapted = []
+        for freq in frequencies:
+            while freq < profile['frequency_range'][0]:
+                freq *= 2
+            while freq > profile['frequency_range'][1]:
+                freq /= 2
+            adapted.append(freq)
+        return adapted
+    
+    def _get_note_duration(self, genre: str, mood: str) -> float:
+        """Get note duration based on genre and mood"""
+        durations = {
+            'classical': 1.0,
+            'folk': 0.8,
+            'devotional': 1.2,
+            'contemporary': 0.6
+        }
+        base_duration = durations.get(genre, 1.0)
+        
+        # Adjust for mood
+        if mood == 'energetic':
+            base_duration *= 0.8
+        elif mood == 'peaceful':
+            base_duration *= 1.2
+            
+        return base_duration
+    
+    def _get_chord_progression(self, mood: str) -> List[List[float]]:
+        """Get chord progression for mood"""
+        progressions = {
+            'peaceful': [
+                [261.63, 329.63, 392.00],  # C major
+                [293.66, 369.99, 440.00],  # D major
+                [349.23, 440.00, 523.25],  # F major
+                [261.63, 329.63, 392.00]   # C major
+            ],
+            'joyful': [
+                [261.63, 329.63, 392.00],  # C major
+                [392.00, 493.88, 587.33],  # G major
+                [349.23, 440.00, 523.25],  # F major
+                [261.63, 329.63, 392.00]   # C major
+            ],
+            'romantic': [
+                [261.63, 329.63, 392.00],  # C major
+                [220.00, 277.18, 329.63],  # A minor
+                [349.23, 440.00, 523.25],  # F major
+                [392.00, 493.88, 587.33]   # G major
+            ],
+            'devotional': [
+                [261.63, 311.13, 392.00],  # C minor-ish
+                [293.66, 349.23, 440.00],  # D minor-ish
+                [277.18, 329.63, 415.30],  # Bb major-ish
+                [261.63, 311.13, 392.00]   # C minor-ish
+            ]
+        }
+        return progressions.get(mood, progressions['peaceful'])
+    
+    def _create_adsr_envelope(self, length: int, profile: Dict) -> np.ndarray:
+        """Create ADSR envelope for realistic sound"""
+        envelope = np.ones(length)
+        
+        attack_samples = int(profile['attack'] * self.sample_rate)
+        decay_samples = int(profile['decay'] * self.sample_rate)
+        release_samples = int(profile['release'] * self.sample_rate)
+        
+        # Attack
+        if attack_samples > 0 and attack_samples < length:
+            envelope[:attack_samples] = np.linspace(0, 1, attack_samples)
+        
+        # Decay
+        if decay_samples > 0 and attack_samples + decay_samples < length:
+            decay_end = attack_samples + decay_samples
+            envelope[attack_samples:decay_end] = np.linspace(1, profile['sustain'], decay_samples)
+        
+        # Sustain (middle part remains at sustain level)
+        sustain_start = attack_samples + decay_samples
+        sustain_end = max(length - release_samples, sustain_start)
+        if sustain_start < sustain_end:
+            envelope[sustain_start:sustain_end] = profile['sustain']
+        
+        # Release
+        if release_samples > 0 and release_samples < length:
+            envelope[-release_samples:] = np.linspace(profile['sustain'], 0, release_samples)
+        
+        return envelope
+
+    def get_instrument_list(self) -> List[Dict]:
+        """Get list of available instruments"""
+        return [
+            {
+                "id": key,
+                "name": key.title(),
+                "type": profile["type"],
+                "cultural_weight": profile["cultural_weight"]
+            }
+            for key, profile in self.instrument_profiles.items()
+        ]
