@@ -1,0 +1,11 @@
+requests==2.31.0
+beautifulsoup4==4.12.3
+gdown==5.2.0
+psd-tools==1.9.33
+Pillow==10.3.0
+tifffile==2024.2.12
+google-api-python-client==2.127.0
+google-auth==2.29.0
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0
+patool==2.3.0
