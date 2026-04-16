@@ -1,0 +1,108 @@
+name: PSD Automation Pipeline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */7 * * *'   # Safety fallback every 7 hours
+
+concurrency:
+  group: psd-automation
+  cancel-in-progress: false  # Never cancel a running job
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  automate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # GitHub hard max = 6 hours
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      # ── 2. Python setup ────────────────────────────────────────────────────
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: pip-
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # ── 3. System tools (unrar, 7zip) ──────────────────────────────────────
+      - name: Install system tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y unrar-free p7zip-full libmagic1 fonts-dejavu
+
+      # ── 4. Pull latest state from repo ─────────────────────────────────────
+      - name: Pull latest state
+        run: git pull origin main || true
+
+      # ── 5. Run automation for 5.5 hours ────────────────────────────────────
+      - name: Run automation (5h 30m window)
+        env:
+          FORPSD_COOKIE:    ${{ secrets.FORPSD_COOKIE }}
+          GDRIVE_SA_JSON:   ${{ secrets.GDRIVE_SA_JSON }}
+          GDRIVE_PSD_FOLDER:  ${{ secrets.GDRIVE_PSD_FOLDER }}
+          GDRIVE_WEBP_FOLDER: ${{ secrets.GDRIVE_WEBP_FOLDER }}
+          RUN_MINUTES: "330"
+        run: python scripts/main.py
+
+      # ── 6. Commit progress ─────────────────────────────────────────────────
+      - name: Save state to repo
+        if: always()
+        run: |
+          git config user.name  "PSD-Bot"
+          git config user.email "psdbot@automation.local"
+          git add state.json automation.log 2>/dev/null || true
+          git diff --cached --quiet || \
+            git commit -m "🤖 Progress: $(date '+%Y-%m-%d %H:%M UTC')"
+          git push origin main || true
+
+      # ── 7. Check if all work is done ───────────────────────────────────────
+      - name: Check completion status
+        id: check
+        if: always()
+        run: |
+          if [ -f ALL_DONE ]; then
+            echo "status=done" >> $GITHUB_OUTPUT
+            echo "✅ All items processed — no next run needed."
+          else
+            echo "status=continue" >> $GITHUB_OUTPUT
+            echo "⏳ More items pending — scheduling next run."
+          fi
+
+      # ── 8. Sleep 10 min then self-trigger ──────────────────────────────────
+      - name: Sleep 10 minutes (mandatory break)
+        if: steps.check.outputs.status == 'continue'
+        run: |
+          echo "Sleeping 10 minutes before re-triggering..."
+          sleep 600
+
+      - name: Trigger next run
+        if: steps.check.outputs.status == 'continue'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id:  'automation.yml',
+              ref: 'main'
+            });
+            console.log('✅ Next run triggered successfully.');
