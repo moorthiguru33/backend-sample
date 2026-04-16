@@ -1,0 +1,17 @@
+# Runtime outputs
+automation.log
+ALL_DONE
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+env/
+
+# Secrets (never commit these)
+*.json.key
+sa_credentials.json
+
+# Temp work
+/tmp/
