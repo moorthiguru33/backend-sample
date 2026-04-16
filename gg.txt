@@ -1,0 +1,126 @@
+# PSD Automation Pipeline
+### forpsd.com → Process → Google Drive (fully automatic)
+
+---
+
+## ✅ இந்த automation என்ன செய்யும்?
+
+| Step | Action |
+|------|--------|
+| 1 | forpsd.com-ல் உள்ள 400+ pages scrape செய்யும் |
+| 2 | ஒவ்வொரு item-ஐயும் Google Drive-லிருந்து download செய்யும் |
+| 3 | ZIP/RAR extract செய்து PSD/TIF files எடுக்கும் |
+| 4 | TOP first layer delete செய்யும் |
+| 5 | Watermark (`www.tamilpsd.in`) low opacity-ல் add செய்து WebP create செய்யும் |
+| 6 | ZIP → `tamilpsd` folder, WebP → `tamilpsd preview` folder-ல் upload செய்யும் |
+| 7 | 5.5 hours வேலை → 10 min break → auto restart |
+
+---
+
+## 🔧 ONE-TIME SETUP (ஒரே ஒரு முறை மட்டும்)
+
+### Step 1 – GitHub Repository
+
+```bash
+# New private repo உருவாக்கவும் (e.g. psd-pipeline)
+# இந்த folder-ல் உள்ள எல்லா files-ஐயும் push செய்யவும்
+git init
+git add .
+git commit -m "Initial setup"
+git remote add origin https://github.com/YOUR_USERNAME/psd-pipeline.git
+git push -u origin main
+```
+
+---
+
+### Step 2 – forpsd.com Cookie எடுக்கவும்
+
+1. Browser-ல் **forpsd.com** திறந்து **Login** செய்யவும்
+2. **F12** → Network tab → Refresh page
+3. எந்தவது request-ஐ click → **Headers** → **Request Headers**
+4. `Cookie:` header-ல் உள்ள **முழு value-ஐயும் copy** செய்யவும்
+
+```
+laravel_session=xxxx; XSRF-TOKEN=yyyy; remember_web_xxxx=zzzz; ...
+```
+
+> ⚠️ இந்த cookie **30 days** வரை valid. Expire ஆனால் மீண்டும் copy செய்து secret update பண்ணவும்.
+
+---
+
+### Step 3 – Google Drive Service Account
+
+1. [console.cloud.google.com](https://console.cloud.google.com) → **New Project**
+2. **APIs & Services** → **Enable APIs** → **Google Drive API** enable செய்யவும்
+3. **IAM & Admin** → **Service Accounts** → **Create Service Account**
+4. Key tab → **Add Key** → JSON → Download
+5. Downloaded JSON file-ஐ open செய்து **முழு contents copy** செய்யவும் (single line paste பண்ணவும்)
+
+---
+
+### Step 4 – Google Drive Folders Setup
+
+1. Drive-ல் **"tamilpsd"** என்று ஒரு folder create செய்யவும்
+2. Drive-ல் **"tamilpsd preview"** என்று ஒரு folder create செய்யவும்
+3. இரண்டு folders-ஐயும் **Service Account email-ஐ Editor-ஆக share** செய்யவும்
+   - Service account email format: `name@project.iam.gserviceaccount.com`
+4. ஒவ்வொரு folder-ஐயும் open செய்யும்போது URL-ல் folder ID இருக்கும்:
+   - `drive.google.com/drive/folders/`**`1ABC123xyz...`** ← இதுதான் Folder ID
+
+---
+
+### Step 5 – GitHub Secrets Add செய்யவும்
+
+GitHub repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
+
+| Secret Name | Value |
+|------------|-------|
+| `FORPSD_COOKIE` | Step 2-ல் copy செய்த cookie string |
+| `GDRIVE_SA_JSON` | Step 3-ல் copy செய்த JSON (one line) |
+| `GDRIVE_PSD_FOLDER` | "tamilpsd" folder ID |
+| `GDRIVE_WEBP_FOLDER` | "tamilpsd preview" folder ID |
+
+---
+
+### Step 6 – First Run தொடங்கவும்
+
+GitHub repo → **Actions** tab → **PSD Automation Pipeline** → **Run workflow** → **Run workflow**
+
+---
+
+## 🔄 How it runs automatically
+
+```
+Run starts
+  │
+  ├── 5.5 hours: process items
+  │
+  └── Time up → commit state → sleep 10 min → trigger next run
+                                     │
+                               Next run starts
+                               from where it stopped
+```
+
+- **State** `state.json` file-ல் save ஆகும் (repo-ல் commit ஆகும்)
+- **Processed items** மீண்டும் process ஆகாது (duplicate skip)
+- **Errors** தன்னால் skip ஆகி next item-க்கு போகும்
+- **ALL_DONE** file உருவாக்கப்பட்டால் automation தானாக நிற்கும்
+
+---
+
+## ❓ Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| "No URLs scraped" | FORPSD_COOKIE expire ஆகிவிட்டது. Browser-லிருந்து மீண்டும் copy செய்யவும் |
+| "Download failed" | Google Drive file public-ஆக இல்லை — forpsd.com admin-ஐ contact செய்யவும் |
+| "Upload 403 error" | Service account email-ஐ Drive folder-ல் share செய்யவிட்டீர்களா check செய்யவும் |
+| Workflow not re-triggering | Settings → Actions → General → "Allow GitHub Actions to create workflows" enable செய்யவும் |
+
+---
+
+## 📊 Progress Monitor செய்வது எப்படி?
+
+- **Actions tab** → Running workflow → Logs பார்க்கலாம்
+- **state.json** file-ல் எத்தனை processed, எத்தனை pending என்று இருக்கும்
+- **automation.log** file-ல் detailed logs இருக்கும்
