@@ -171,8 +171,12 @@
     "https://forpsd.com/download/eyJpdiI6IkpvdE5MbSszYm5POFBDL0Z2ZDF5NUE9PSIsInZhbHVlIjoiUUJTcEJ5bmVEc1hZaVY1SkVaZ0dBUT09IiwibWFjIjoiYmIyNDhjZmY1NjdmZTNkNzY2ZjZiNGM0YzFiNjhiZGZjYzM5ZjVlZmJmZDQ2ZDg4NTNlNTRjZTNkMTE1YTY5MCIsInRhZyI6IiJ9",
     "https://forpsd.com/download/eyJpdiI6IklzbTZsQlAyQUo5RGg5dTRyWk1aOEE9PSIsInZhbHVlIjoiY1NrcDJCNTYvRllidmdSQURLWStKQT09IiwibWFjIjoiZmZjOWRlZmViOGY3OTk0MThjZjJlYWNhMWE3M2ZlOGExNTQ4MDA0NDVmYTM0NGZkZjE1NmY1MGZlMzlmMjAxZSIsInRhZyI6IiJ9"
   ],
-  "processed": [],
-  "total_processed": 0,
+  "processed": [
+    "https://forpsd.com/download/eyJpdiI6IlRFRlNNOWRmdkEzZU1YV2MrOUZ0Unc9PSIsInZhbHVlIjoiaUZPZFdXNkRWaUYwTU5yalpCZnNnQT09IiwibWFjIjoiZjQ5ZTkxN2E4NWRkNTk5YzU2NDNkN2ViNGExMzE3NjM2ZTA2MzJkYzE1ZTMzODM2YzY3NzFkNjZlNWQyNGYwZSIsInRhZyI6IiJ9",
+    "https://forpsd.com/download/eyJpdiI6InR1Qmo3RWxoV2lMWW9TSnNEak1LOFE9PSIsInZhbHVlIjoiVFR4V00zZ083WTF5ZEFwcXdRSVlSQT09IiwibWFjIjoiOTU2MTY4ZDRhYTAxOTBjZDhiNzU3ODdjNjU2ZDAzMDUzN2Y0MDAxNTRkYmE4NGI5MTE5OWRlOTRmMWQyYWFjNSIsInRhZyI6IiJ9",
+    "https://forpsd.com/download/eyJpdiI6IlIwTG5XeURnV1hqL29CZ3JnOElBYlE9PSIsInZhbHVlIjoiTHRpcWZoeEo2SWJla0FhRVpyaDFGZz09IiwibWFjIjoiMGU1ZWFjYWZkOGE0MTNkNmNlYjAzYmFmYjNkNWFiNTY5NmQ5M2RhNWEyMWU1YzBjNjg2NjJkYzRlNDc3NThiNyIsInRhZyI6IiJ9"
+  ],
+  "total_processed": 3,
   "last_run": null,
   "status": "init"
 }
