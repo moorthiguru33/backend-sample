@@ -7,8 +7,11 @@ import os
 FORPSD_COOKIE: str = os.environ.get("FORPSD_COOKIE", "")
 BASE_URL: str = "https://forpsd.com"
 
-# ── Google Drive ───────────────────────────────────────────────────────────
-GDRIVE_SA_JSON: str = os.environ.get("GDRIVE_SA_JSON", "")
+# ── Google Drive – OAuth2 credentials (3 GitHub secrets) ──────────────────
+# Old method (Service Account JSON) is replaced by these 3 lightweight vars.
+GOOGLE_CLIENT_ID:      str = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET:  str = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REFRESH_TOKEN:  str = os.environ.get("GOOGLE_REFRESH_TOKEN", "")
 
 # Folder IDs (from Drive URL → /drive/folders/<FOLDER_ID>)
 GDRIVE_PSD_FOLDER:  str = os.environ.get("GDRIVE_PSD_FOLDER", "")    # psd/    ← original files
@@ -27,11 +30,9 @@ WATERMARK_OPACITY: int = 40   # 0–255  (40 ≈ 16% — visible but not obtrusi
 # PNG watermark file path (tree-style logo).
 # • Set WATERMARK_PNG env var to an absolute path of your tree logo PNG.
 # • Leave empty to use the diagonal text tile watermark instead.
-# Example: WATERMARK_PNG=/path/to/watermark-tree.png
 WATERMARK_PNG: str = os.environ.get("WATERMARK_PNG", "")
 
 # ── WebP size limit ────────────────────────────────────────────────────────
-# Target maximum file size in KB for each preview WebP.
 WEBP_MAX_KB: int = int(os.environ.get("WEBP_MAX_KB", "100"))
 
 # ── Paths ──────────────────────────────────────────────────────────────────

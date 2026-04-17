@@ -24,7 +24,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import (
-    FORPSD_COOKIE, GDRIVE_SA_JSON, GDRIVE_PSD_FOLDER, GDRIVE_WEBP_FOLDER,
+    FORPSD_COOKIE,
+    GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN,
+    GDRIVE_PSD_FOLDER, GDRIVE_WEBP_FOLDER,
     RUN_MINUTES, PAGE_LIMIT, WORK_DIR, STATE_FILE, DONE_FILE, LOG_FILE,
 )
 from state_manager import StateManager
@@ -48,10 +50,12 @@ log = logging.getLogger(__name__)
 
 def check_secrets() -> bool:
     missing = []
-    if not FORPSD_COOKIE:      missing.append("FORPSD_COOKIE")
-    if not GDRIVE_SA_JSON:     missing.append("GDRIVE_SA_JSON")
-    if not GDRIVE_PSD_FOLDER:  missing.append("GDRIVE_PSD_FOLDER")
-    if not GDRIVE_WEBP_FOLDER: missing.append("GDRIVE_WEBP_FOLDER")
+    if not FORPSD_COOKIE:          missing.append("FORPSD_COOKIE")
+    if not GOOGLE_CLIENT_ID:       missing.append("GOOGLE_CLIENT_ID")
+    if not GOOGLE_CLIENT_SECRET:   missing.append("GOOGLE_CLIENT_SECRET")
+    if not GOOGLE_REFRESH_TOKEN:   missing.append("GOOGLE_REFRESH_TOKEN")
+    if not GDRIVE_PSD_FOLDER:      missing.append("GDRIVE_PSD_FOLDER")
+    if not GDRIVE_WEBP_FOLDER:     missing.append("GDRIVE_WEBP_FOLDER")
     if missing:
         log.error(f"Missing GitHub Secrets: {', '.join(missing)}")
         return False
@@ -75,7 +79,7 @@ def main() -> None:
 
     state    = StateManager(STATE_FILE)
     scraper  = ForPSDScraper(FORPSD_COOKIE)
-    uploader = DriveUploader(GDRIVE_SA_JSON)
+    uploader = DriveUploader(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN)
 
     # ── Phase 1: collect all URLs (first run only) ─────────────────────────
     if not state.get("all_urls"):

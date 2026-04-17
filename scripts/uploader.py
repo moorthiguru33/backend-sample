@@ -1,21 +1,25 @@
 """
-uploader.py – Upload files to Google Drive using a Service Account.
+uploader.py – Upload files to Google Drive using OAuth2 (Refresh Token).
 
-Setup (one-time):
-  1. Google Cloud Console → Create a project → Enable Drive API.
-  2. IAM → Service Accounts → Create → Download JSON key.
-  3. Open both target folders in Drive → Share → Add the service-account
-     email (ends in @…iam.gserviceaccount.com) as Editor.
-  4. Store the JSON key contents (single-line) in GitHub secret GDRIVE_SA_JSON.
-  5. Store the folder IDs in GDRIVE_PSD_FOLDER and GDRIVE_WEBP_FOLDER.
+No service-account JSON blob needed. Uses 3 simple GitHub secrets:
+  GOOGLE_CLIENT_ID
+  GOOGLE_CLIENT_SECRET
+  GOOGLE_REFRESH_TOKEN
+
+One-time setup:
+  1. Google Cloud Console → Enable Drive API
+  2. Create OAuth 2.0 Desktop credentials → get client_id + client_secret
+  3. Run get_refresh_token.py locally → get refresh_token
+  4. Add all three to GitHub → Settings → Secrets and variables → Actions
+  5. Share target Drive folders with the Google account you authenticated with
 """
 
-import json
 import logging
 import mimetypes
 from pathlib import Path
 
-from google.oauth2 import service_account
+import google.auth.transport.requests
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
@@ -23,17 +27,32 @@ from googleapiclient.http import MediaFileUpload
 log = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
+TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 
 class DriveUploader:
-    def __init__(self, sa_json_string: str):
-        info = json.loads(sa_json_string)
-        creds = service_account.Credentials.from_service_account_info(
-            info, scopes=SCOPES
+    def __init__(self, client_id: str, client_secret: str, refresh_token: str):
+        """
+        Build Drive service using OAuth2 refresh token.
+        The access token is obtained automatically and refreshed as needed.
+        """
+        creds = Credentials(
+            token=None,                  # No access token yet — will be fetched
+            refresh_token=refresh_token,
+            token_uri=TOKEN_URI,
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=SCOPES,
         )
+        # Force immediate token refresh so any auth error fails fast at startup
+        request = google.auth.transport.requests.Request()
+        creds.refresh(request)
+
         self._svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+        log.info("✅ Google Drive authenticated via OAuth2 refresh token")
 
     # ── Internal helpers ───────────────────────────────────────────────────
+
     def _mime(self, path: Path) -> str:
         mt, _ = mimetypes.guess_type(str(path))
         return mt or "application/octet-stream"
@@ -48,7 +67,8 @@ class DriveUploader:
         return len(result.get("files", [])) > 0
 
     # ── Public API ─────────────────────────────────────────────────────────
-    def upload(self, file_path: str | Path, folder_id: str) -> dict:
+
+    def upload(self, file_path: "str | Path", folder_id: str) -> dict:
         """
         Upload file_path to the specified Drive folder.
         Skips if a file with the same name already exists.
@@ -69,7 +89,7 @@ class DriveUploader:
                 body=metadata, media_body=media, fields="id,name,webViewLink"
             )
 
-            # Resumable upload with progress
+            # Resumable upload with progress logging
             response = None
             while response is None:
                 status, response = request.next_chunk()
