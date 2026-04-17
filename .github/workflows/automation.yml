@@ -62,7 +62,7 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y unrar-free p7zip-full libmagic1 fonts-dejavu
+          sudo apt-get install -y unrar-free p7zip-full libmagic1
 
       # ── 4. Pull latest state from repo ─────────────────────────────────────
       - name: Pull latest state
@@ -76,9 +76,8 @@ jobs:
           GOOGLE_CLIENT_ID:      ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET:  ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN:  ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-          # ── Drive folder IDs
+          # ── Drive folder ID (PSD only — no WebP/preview folder)
           GDRIVE_PSD_FOLDER:     ${{ secrets.GDRIVE_PSD_FOLDER }}
-          GDRIVE_WEBP_FOLDER:    ${{ secrets.GDRIVE_WEBP_FOLDER }}
           RUN_MINUTES: "330"
           PAGE_LIMIT:  ${{ github.event.inputs.page_limit  || '0' }}
           ITEM_LIMIT:  ${{ github.event.inputs.item_limit  || '0' }}
