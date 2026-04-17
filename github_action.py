@@ -57,7 +57,7 @@ DESIGNS_PATH  = "designs.xlsx"
 CDN_BASE = f"https://cdn.jsdelivr.net/gh/{BACKEND_REPO}@main/{PREVIEW_DIR}"
 
 # ── ModelScope ────────────────────────────────────────────────────────────────
-MODELSCOPE_API = "https://api-inference.modelscope.cn/v1/chat/completions"
+MODELSCOPE_API = "https://api-inference.modelscope.ai/v1/chat/completions"
 VISION_MODEL   = "Qwen/Qwen2.5-VL-72B-Instruct"
 
 # ── Processing limits ─────────────────────────────────────────────────────────
