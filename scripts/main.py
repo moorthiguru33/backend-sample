@@ -125,9 +125,33 @@ def main() -> None:
     log.info(f"State: {state.summary()}")
 
     if not pending:
-        log.info("🎉 All items already processed!")
-        Path(DONE_FILE).touch()
-        return
+        # All KNOWN items are done — re-scrape to check for newly added items
+        limit_msg = f"first {PAGE_LIMIT} pages" if PAGE_LIMIT > 0 else "all pages"
+        log.info(f"All known items processed. Re-scraping ({limit_msg}) to check for new items …")
+
+        refreshed_items = scraper.get_all_items(page_limit=PAGE_LIMIT)
+
+        existing_urls = {
+            item.get("download_url", "")
+            for item in state.get("all_items", [])
+        }
+        truly_new = [
+            item for item in refreshed_items
+            if item.get("download_url") and item["download_url"] not in existing_urls
+        ]
+
+        if truly_new:
+            all_items = state.get("all_items", [])
+            all_items.extend(truly_new)
+            state.set("all_items", all_items)
+            state.set("all_urls", [i["download_url"] for i in all_items])
+            state.save()
+            log.info(f"Found {len(truly_new)} new item(s) → added to state.json")
+            pending = state.pending_items()
+        else:
+            log.info("🎉 No new items found on site. All done!")
+            Path(DONE_FILE).touch()
+            return
 
     # ── Global file counter — persisted across ALL runs and ALL categories ──
     # This ensures continuous numbering: tamilpsd-0001 … tamilpsd-9999+
