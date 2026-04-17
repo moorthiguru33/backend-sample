@@ -1,0 +1,97 @@
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║   Tamil PSD Marketplace — GitHub Actions Workflow                   ║
+# ║                                                                      ║
+# ║  Repo this workflow lives in : moorthiguru33/backend-sample          ║
+# ║  Preview images upload to    : backend-sample/preview_image/         ║
+# ║  designs.xlsx pushed to      : moorthiguru33/Gurumoorthi             ║
+# ║                                                                      ║
+# ║  Required Secrets (Settings → Secrets → Actions):                   ║
+# ║    GOOGLE_CLIENT_ID      Google OAuth2 client ID                    ║
+# ║    GOOGLE_CLIENT_SECRET  Google OAuth2 client secret                ║
+# ║    GOOGLE_REFRESH_TOKEN  OAuth2 refresh token (one-time setup)      ║
+# ║    GDRIVE_PSD_FOLDER     GDrive folder ID — PSD source folder       ║
+# ║    GDRIVE_UPLOAD_FOLDER  GDrive folder ID — ZIP destination folder  ║
+# ║    SCOPE                 ModelScope API token                       ║
+# ║    GH_PAT                GitHub PAT (repo scope, access both repos) ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+
+name: Tamil PSD Pipeline
+
+on:
+  # ── Manual trigger from GitHub Actions UI ─────────────────────────────────
+  workflow_dispatch:
+
+  # ── Scheduled: run every 6 hours automatically ────────────────────────────
+  schedule:
+    - cron: '0 */6 * * *'
+
+  # ── Also run on push to main (optional — remove if not needed) ────────────
+  # push:
+  #   branches: [ main ]
+
+jobs:
+  psd-pipeline:
+    name: Process PSD Designs
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # 5h 50m — GH Actions hard limit is 6h
+
+    # Write permission needed to commit preview images to this repo
+    permissions:
+      contents: write
+
+    steps:
+      # ── 1. Checkout this repo (backend-sample) ──────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      # ── 2. Set up Python ────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── 3. Cache pip packages ───────────────────────────────────────────────
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-psd-v1
+          restore-keys: |
+            ${{ runner.os }}-pip-psd-
+
+      # ── 4. Install dependencies ─────────────────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            psd-tools \
+            Pillow \
+            pandas \
+            openpyxl \
+            requests
+
+      # ── 5. Run the pipeline ─────────────────────────────────────────────────
+      - name: Run Tamil PSD Pipeline
+        env:
+          GOOGLE_CLIENT_ID:     ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          GDRIVE_PSD_FOLDER:    ${{ secrets.GDRIVE_PSD_FOLDER }}
+          GDRIVE_UPLOAD_FOLDER: ${{ secrets.GDRIVE_UPLOAD_FOLDER }}
+          SCOPE:                ${{ secrets.SCOPE }}
+          GH_PAT:               ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN:         ${{ secrets.GITHUB_TOKEN }}
+        run: python github_action.py
+
+      # ── 6. Summary ──────────────────────────────────────────────────────────
+      - name: Print summary
+        if: always()
+        run: |
+          echo "## Tamil PSD Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Run completed at: $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "- Preview images: \`backend-sample/preview_image/\`" >> $GITHUB_STEP_SUMMARY
+          echo "- CDN base: \`https://cdn.jsdelivr.net/gh/moorthiguru33/backend-sample@main/preview_image/\`" >> $GITHUB_STEP_SUMMARY
+          echo "- designs.xlsx: \`moorthiguru33/Gurumoorthi/designs.xlsx\`" >> $GITHUB_STEP_SUMMARY
