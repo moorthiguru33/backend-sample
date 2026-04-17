@@ -94,8 +94,6 @@ def main() -> None:
     log.info("=" * 70)
     log.info(f"Run started at {start_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     log.info(f"Will work until {deadline.strftime('%H:%M:%S UTC')}  ({RUN_MINUTES} min)")
-    log.info(f"Item limit this run: {ITEM_LIMIT if ITEM_LIMIT > 0 else 'unlimited'}")
-    log.info("=" * 70)
 
     work_root = Path(WORK_DIR)
     work_root.mkdir(parents=True, exist_ok=True)
@@ -103,6 +101,22 @@ def main() -> None:
     state    = StateManager(STATE_FILE)
     scraper  = ForPSDScraper(FORPSD_COOKIE)
     uploader = DriveUploader(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN)
+
+    # ── CRITICAL FIX: Convert ITEM_LIMIT & PAGE_LIMIT from string to int ──
+    # (GitHub Actions always passes them as strings)
+    try:
+        ITEM_LIMIT = int(ITEM_LIMIT)
+    except (ValueError, TypeError):
+        ITEM_LIMIT = 0
+
+    try:
+        PAGE_LIMIT = int(PAGE_LIMIT)
+    except (ValueError, TypeError):
+        PAGE_LIMIT = 0
+
+    log.info(f"Item limit this run: {ITEM_LIMIT if ITEM_LIMIT > 0 else 'unlimited'}")
+    log.info(f"Page limit this run: {PAGE_LIMIT if PAGE_LIMIT > 0 else 'unlimited'}")
+    log.info("=" * 70)
 
     # ── Phase 1: collect all items (first run only) ────────────────────────
     if not state.get("all_items"):
@@ -130,8 +144,6 @@ def main() -> None:
         return
 
     # ── Global file counter — persisted across ALL runs and ALL categories ──
-    # This ensures continuous numbering: tamilpsd-0001 … tamilpsd-9999+
-    # regardless of category changes between items.
     file_counter: int = state.get("file_counter", 1)
     log.info(f"File counter starts at: {file_counter}  (next → tamilpsd-{file_counter:04d})")
 
@@ -169,7 +181,6 @@ def main() -> None:
             log.info(f"─── Processing: {download_url}")
 
             # ── 2a: Get category from post title / product detail page ──────
-            # Use cached category if already stored in the item dict
             category = item.get("category", "")
             if not category:
                 card_title = item.get("card_title", "")
@@ -222,8 +233,6 @@ def main() -> None:
             renamed_files, next_index = result
 
             # ── 2e: Upload renamed PSD/TIF → category subfolder ───────────
-            # Files go into:  GDRIVE_PSD_FOLDER / <category> /
-            # Folder is auto-created on Drive if it does not exist.
             uploaded_count = 0
             for orig in renamed_files:
                 if orig.exists():
