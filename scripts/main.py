@@ -52,6 +52,10 @@ from downloader import download_from_drive
 from processor import process_archive
 from uploader import DriveUploader
 
+# How many posts forpsd.com shows per listing page.
+# Used to calculate which page the next pending items are on.
+POSTS_PER_PAGE: int = 17
+
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -78,49 +82,53 @@ def check_secrets() -> bool:
     return True
 
 
-def _full_scrape(scraper: ForPSDScraper, state: StateManager) -> None:
+def _smart_scrape(scraper: ForPSDScraper, state: StateManager, item_limit: int) -> int:
     """
-    First-time full scrape. Populates state all_items from scratch.
-    Called only when state has no all_items yet.
+    Targeted scrape: fetch ONLY the listing pages that contain the next
+    `item_limit` unprocessed items.
+
+    Logic
+    -----
+    Each forpsd.com listing page has POSTS_PER_PAGE (17) items.
+    If N items are already done, the next unprocessed item is at
+    position N (0-indexed), which lives on page:
+
+        start_page = (done_count // POSTS_PER_PAGE) + 1
+
+    Examples
+    --------
+        done=0   → start_page=1   (first 17 items are on page 1)
+        done=17  → start_page=2   (items 18-34 are on page 2)
+        done=30  → start_page=2   (item 31 is on page 2, 32-34 too, 35+ on page 3)
+        done=34  → start_page=3   (items 35-51 are on page 3)
+
+    For ITEM_LIMIT=2 with 34 already done, we only scrape page 3
+    and stop the moment we have 2 new items — never touching pages 4-400+.
+
+    For ITEM_LIMIT=0 (unlimited), we start at start_page and scrape
+    to the end — still much smarter than always starting at page 1.
+
+    Returns the number of new items added to state.
     """
-    limit_msg = f"first {PAGE_LIMIT} pages" if PAGE_LIMIT > 0 else "all pages"
-    log.info(f"First run – full scrape ({limit_msg}) ...")
+    done_count = len(state.get("processed", []))
+    start_page = (done_count // POSTS_PER_PAGE) + 1
 
-    all_items = scraper.get_all_items(page_limit=PAGE_LIMIT)
-    if not all_items:
-        log.error("Could not scrape any items. Check FORPSD_COOKIE secret.")
-        sys.exit(2)
-
-    state.set("all_items", all_items)
-    state.set("all_urls", [item["download_url"] for item in all_items])
-    state.set("processed", [])
-    state.save()
-    log.info(f"Collected {len(all_items)} items -> saved to state.json")
-
-
-def _incremental_scrape(scraper: ForPSDScraper, state: StateManager) -> int:
-    """
-    Re-scrape to find items added to the site since our last scrape.
-
-    Passes the set of already-known URLs to get_all_items() so it stops
-    scraping as soon as it hits a page where every URL is already known.
-    Typically only 1-2 pages are fetched even on a site with thousands of items.
-
-    Returns the number of newly discovered items (0 = site has nothing new).
-    """
-    existing_urls: set[str] = {
+    # URLs already known — skip them so we don't re-add to state
+    known_urls: set[str] = {
         item.get("download_url", "")
         for item in state.get("all_items", [])
     }
 
     log.info(
-        f"All {len(existing_urls)} known items are done. "
-        "Incremental re-scrape to check for new items on site ..."
+        f"Smart scrape: done={done_count} → start_page={start_page} | "
+        f"need={item_limit if item_limit > 0 else 'unlimited'} new items"
     )
 
     new_items = scraper.get_all_items(
         page_limit=PAGE_LIMIT,
-        stop_at_known_urls=existing_urls,
+        stop_at_known_urls=known_urls if known_urls else None,
+        start_page=start_page,
+        max_new_items=item_limit,          # 0 = no cap (scrape to end)
     )
 
     if not new_items:
@@ -131,7 +139,10 @@ def _incremental_scrape(scraper: ForPSDScraper, state: StateManager) -> int:
     state.set("all_items", all_items)
     state.set("all_urls", [i["download_url"] for i in all_items])
     state.save()
-    log.info(f"Found {len(new_items)} new item(s) -> added to state.json")
+    log.info(
+        f"Smart scrape done: +{len(new_items)} new items "
+        f"(total known: {len(all_items)})"
+    )
     return len(new_items)
 
 
@@ -156,21 +167,26 @@ def main() -> None:
     uploader = DriveUploader(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN)
 
     # ── Phase 1: Ensure we have pending items ─────────────────────────────
-    if not state.get("all_items"):
-        # Truly first run — nothing in state at all
-        _full_scrape(scraper, state)
-    else:
-        pending_check = state.pending_items()
-        if not pending_check:
-            # All currently-known items are done. Check if the site has more.
-            found_new = _incremental_scrape(scraper, state)
-            if found_new == 0:
-                log.info("No new items found on site. Everything is done!")
-                Path(DONE_FILE).touch()
-                return
-
-    # ── Reload pending list (may have grown after incremental scrape) ──────
     pending = state.pending_items()
+
+    if not pending:
+        # Either truly first run (state empty) or all known items are done.
+        # Either way: smart-scrape to fetch exactly the pages we need.
+        if not state.get("all_items"):
+            log.info("First run — smart scrape for initial batch ...")
+        else:
+            log.info(
+                f"All {len(state.get('all_items', []))} known items are done. "
+                "Smart scrape to check for more on site ..."
+            )
+
+        found_new = _smart_scrape(scraper, state, ITEM_LIMIT)
+        if found_new == 0:
+            log.info("No new items found on site. Everything is done!")
+            Path(DONE_FILE).touch()
+            return
+
+        pending = state.pending_items()
     log.info(f"State: {state.summary()}")
 
     if not pending:
