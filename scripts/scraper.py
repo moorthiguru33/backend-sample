@@ -354,9 +354,11 @@ class ForPSDScraper:
         self,
         page_limit: int = 0,
         stop_at_known_urls: "set | None" = None,
+        start_page: int = 1,
+        max_new_items: int = 0,
     ) -> list[dict]:
         """
-        Return list of dicts for every item across all listing pages.
+        Return list of dicts for items across listing pages.
 
         Each dict:
           {
@@ -365,24 +367,36 @@ class ForPSDScraper:
             "card_title":   str,   <- title from listing card (best-effort)
           }
 
+        start_page (int):
+          Start scraping from this page number instead of page 1.
+          Used for targeted scraping — when done_count is known, the
+          caller calculates exactly which page contains the next new items.
+          E.g. 34 items done → start_page=3, 30 done → start_page=2.
+
+        max_new_items (int):
+          Stop once this many new items are collected (0 = no limit).
+          Combined with start_page, this means we fetch only the exact
+          1–2 pages needed for the current ITEM_LIMIT instead of scraping
+          all 400+ pages.
+
         stop_at_known_urls (set):
-          When provided, this is an incremental re-scrape.
-          Scraping stops as soon as a full page yields ZERO new URLs —
-          meaning every link on that page is already known.
-          This makes re-scrapes fast: only 1-2 pages are fetched when
-          only a handful of new items have been added to the site.
+          When provided, URLs in this set are skipped (not counted as new).
+          In incremental mode this also triggers early-stop when an entire
+          page yields zero new URLs.
 
         The card_title is passed as hint_title to get_category() so that
         detail-page fetches are only needed when the card has no title.
         """
         items: list[dict] = []
         seen_downloads: set[str] = set()
-        page = 1
+        page = max(start_page, 1)
 
         incremental = stop_at_known_urls is not None
         limit_msg   = f"(limit: {page_limit} pages)" if page_limit > 0 else "(no page limit)"
         mode_msg    = " [incremental — stops at known territory]" if incremental else ""
-        log.info(f"Starting scrape {limit_msg}{mode_msg}")
+        start_msg   = f" [start_page={page}]" if page > 1 else ""
+        items_msg   = f" [max_new_items={max_new_items}]" if max_new_items > 0 else ""
+        log.info(f"Starting scrape {limit_msg}{mode_msg}{start_msg}{items_msg}")
 
         while True:
             if page_limit > 0 and page > page_limit:
@@ -440,6 +454,15 @@ class ForPSDScraper:
                 new_this_page += 1
 
             log.info(f"  Page {page}: +{new_this_page} new items  (running total {len(items)})")
+
+            # Early stop: collected enough items for this run.
+            # Checked first so we never fetch an extra page unnecessarily.
+            if max_new_items > 0 and len(items) >= max_new_items:
+                log.info(
+                    f"  Reached max_new_items={max_new_items} — "
+                    "stopping targeted scrape early."
+                )
+                break
 
             # Early stop: in incremental mode, if this page had zero new items
             # every further page will also be all-known — no need to continue.
