@@ -5,17 +5,10 @@ on:
     inputs:
       item_limit:
         description: >
-          How many items (archives) to download and process this run.
-          1 = process exactly 1 file.
-          100 = process 100 files.
-          0 = no limit (process everything pending).
-        required: false
-        default: '0'
-      page_limit:
-        description: >
-          Max listing pages to scrape for download links (first run only).
-          0 = no limit (scrape the whole site).
-          Examples: 10, 100, 1000
+          How many items to download and upload this run.
+          1    = process exactly 1 file.
+          100  = process exactly 100 files.
+          0    = no limit (process everything pending, auto-continues until done).
         required: false
         default: '0'
   schedule:
@@ -72,15 +65,13 @@ jobs:
       - name: Run automation
         env:
           FORPSD_COOKIE:         ${{ secrets.FORPSD_COOKIE }}
-          # ── Google Drive OAuth2 (3 secrets — no service account JSON needed)
           GOOGLE_CLIENT_ID:      ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET:  ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN:  ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-          # ── Drive folder ID (PSD only — no WebP/preview folder)
           GDRIVE_PSD_FOLDER:     ${{ secrets.GDRIVE_PSD_FOLDER }}
           RUN_MINUTES: "330"
-          PAGE_LIMIT:  ${{ github.event.inputs.page_limit  || '0' }}
-          ITEM_LIMIT:  ${{ github.event.inputs.item_limit  || '0' }}
+          PAGE_LIMIT:  "0"
+          ITEM_LIMIT:  ${{ github.event.inputs.item_limit || '0' }}
         run: python scripts/main.py
 
       # ── 6. Commit progress ─────────────────────────────────────────────────
@@ -94,40 +85,44 @@ jobs:
             git commit -m "🤖 Progress: $(date '+%Y-%m-%d %H:%M UTC')"
           git push origin main || true
 
-      # ── 7. Check if all work is done ───────────────────────────────────────
+      # ── 7. Check completion status ─────────────────────────────────────────
       - name: Check completion status
         id: check
         if: always()
         run: |
           if [ -f ALL_DONE ]; then
             echo "status=done" >> $GITHUB_OUTPUT
-            echo "✅ All items processed — no next run needed."
+            echo "All items processed — no next run needed."
           else
             echo "status=continue" >> $GITHUB_OUTPUT
-            echo "⏳ More items pending — scheduling next run."
+            echo "More items pending — scheduling next run."
           fi
 
-      # ── 8. Sleep 10 min then self-trigger (only when no item_limit set) ────
-      - name: Sleep 10 minutes (mandatory break)
+      # ── 8. Auto-continue (only when item_limit=0, i.e. unlimited run) ──────
+      # When user sets item_limit to a number (1, 100, 1000 etc.), the run
+      # stops after that many items and does NOT self-trigger.
+      # When item_limit=0 (default/unlimited), the pipeline self-triggers
+      # every run until everything is done.
+      - name: Sleep 10 minutes before re-triggering
         if: |
           steps.check.outputs.status == 'continue' &&
-          github.event.inputs.item_limit == '0'
+          (github.event.inputs.item_limit == '0' || github.event.inputs.item_limit == '')
         run: |
-          echo "Sleeping 10 minutes before re-triggering..."
+          echo "Sleeping 10 minutes before next run..."
           sleep 600
 
       - name: Trigger next run
         if: |
           steps.check.outputs.status == 'continue' &&
-          github.event.inputs.item_limit == '0'
+          (github.event.inputs.item_limit == '0' || github.event.inputs.item_limit == '')
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id:  'automation.yml',
+              repo:  context.repo.repo,
+              workflow_id: 'automation.yml',
               ref: 'main'
             });
-            console.log('✅ Next run triggered successfully.');
+            console.log('Next run triggered successfully.');
