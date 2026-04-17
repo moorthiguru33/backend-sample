@@ -19,6 +19,13 @@ GDRIVE_SA_JSON: str = os.environ.get("GDRIVE_SA_JSON", "")
 GDRIVE_PSD_FOLDER:  str = os.environ.get("GDRIVE_PSD_FOLDER", "")   # for ZIPs
 GDRIVE_WEBP_FOLDER: str = os.environ.get("GDRIVE_WEBP_FOLDER", "")  # for WebP previews
 
+# ── Scrape limit ───────────────────────────────────────────────────────────
+# Max number of listing pages to scrape for download links.
+# 0 (default) = no limit — scrape every page until the site runs out.
+# Set PAGE_LIMIT=10  → collect only the first 10 pages  (~10–25 items each).
+# Set PAGE_LIMIT=100 → collect the first 100 pages, etc.
+PAGE_LIMIT: int = int(os.environ.get("PAGE_LIMIT", "0"))
+
 # ── Timing ─────────────────────────────────────────────────────────────────
 RUN_MINUTES: int = int(os.environ.get("RUN_MINUTES", "330"))  # 5.5 h default
 

@@ -60,17 +60,39 @@ class ForPSDScraper:
             return None
 
     # ── Collect all download links ─────────────────────────────────────────
-    def get_all_download_urls(self) -> list[str]:
+    def get_all_download_urls(self, page_limit: int = 0) -> list[str]:
         """
         Return list of /download/eyJ… absolute URLs for every item
-        across all pages.
+        across all listing pages.
+
+        Args:
+            page_limit: Maximum number of pages to scrape.
+                        0 (default) = no limit — scrape until the site
+                        runs out of pages.
+                        Any positive integer stops after that many pages,
+                        e.g. page_limit=10  → pages 1–10 only.
         """
         download_urls: list[str] = []
         page = 1
 
+        limit_msg = f"(limit: {page_limit} pages)" if page_limit > 0 else "(no page limit)"
+        log.info(f"Starting scrape {limit_msg}")
+
         while True:
+
+            # ── Page-limit check ───────────────────────────────────────────
+            if page_limit > 0 and page > page_limit:
+                log.info(
+                    f"Reached PAGE_LIMIT={page_limit}. "
+                    f"Stopping after {page - 1} pages "
+                    f"({len(download_urls)} links collected)."
+                )
+                break
+
             url = f"{BASE_URL}/?page={page}"
-            log.info(f"Scraping listing page {page}: {url}")
+            log.info(f"Scraping listing page {page}"
+                     + (f"/{page_limit}" if page_limit > 0 else "")
+                     + f": {url}")
             soup = self._get(url)
             if soup is None:
                 break

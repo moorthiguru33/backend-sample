@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import (
     FORPSD_COOKIE, GDRIVE_SA_JSON, GDRIVE_PSD_FOLDER, GDRIVE_WEBP_FOLDER,
-    RUN_MINUTES, WORK_DIR, STATE_FILE, DONE_FILE, LOG_FILE,
+    RUN_MINUTES, PAGE_LIMIT, WORK_DIR, STATE_FILE, DONE_FILE, LOG_FILE,
 )
 from state_manager import StateManager
 from scraper import ForPSDScraper
@@ -89,8 +89,9 @@ def main() -> None:
 
     # ── Phase 1: collect all URLs (first run only) ─────────────────────────
     if not state.get("all_urls"):
-        log.info("First run detected – scraping all listing pages …")
-        all_urls = scraper.get_all_download_urls()
+        limit_msg = f"first {PAGE_LIMIT} pages" if PAGE_LIMIT > 0 else "all pages"
+        log.info(f"First run detected – scraping {limit_msg} …")
+        all_urls = scraper.get_all_download_urls(page_limit=PAGE_LIMIT)
         if not all_urls:
             log.error("Could not scrape any URLs. Check FORPSD_COOKIE secret.")
             sys.exit(2)
