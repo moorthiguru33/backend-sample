@@ -1,5 +1,5 @@
 """
-scraper.py – Scrapes forpsd.com to collect every download URL.
+scraper.py – Scrapes forpsd.com to collect every download URL + category.
 
 Key insight from page analysis:
   • Each listing card on /?page=N already contains BOTH:
@@ -8,6 +8,12 @@ Key insight from page analysis:
   • We collect /download/eyJ… links directly — no need to visit
     product detail pages one by one.
   • /download/eyJ… redirects → Google Drive share URL.
+
+Category scraping:
+  • For each item, we visit the product detail page to get the category.
+  • Category is extracted from breadcrumb or category tag on the page.
+  • Category is cleaned and used as a subfolder name (e.g. "wedding").
+  • If category is not found, falls back to "uncategorized".
 """
 
 import re
@@ -41,7 +47,6 @@ class ForPSDScraper:
     def _build_session(self, cookie_string: str) -> requests.Session:
         s = requests.Session()
         s.headers.update(self.HEADERS)
-        # Parse "name=value; name2=value2; ..." cookie string
         for part in cookie_string.split(";"):
             part = part.strip()
             if "=" in part:
@@ -59,62 +64,154 @@ class ForPSDScraper:
             log.error(f"GET failed {url}: {exc}")
             return None
 
-    # ── Collect all download links ─────────────────────────────────────────
-    def get_all_download_urls(self, page_limit: int = 0) -> list[str]:
+    # ── Category extraction from product detail page ───────────────────────
+    def get_category(self, product_detail_url: str) -> str:
         """
-        Return list of /download/eyJ… absolute URLs for every item
-        across all listing pages.
+        Visit the product detail page and extract the category.
+
+        Tries multiple strategies in order:
+          1. Breadcrumb navigation links (most reliable)
+          2. Category badge / tag elements
+          3. Meta keywords
+          4. URL path segment
+
+        Returns a clean lowercase category string, e.g. "wedding".
+        Falls back to "uncategorized" if nothing is found.
+        """
+        if not product_detail_url:
+            return "uncategorized"
+
+        soup = self._get(product_detail_url)
+        if soup is None:
+            return "uncategorized"
+
+        # Strategy 1: Breadcrumb — look for <nav> or <ol class="breadcrumb">
+        breadcrumb = (
+            soup.find("ol", class_=re.compile("breadcrumb", re.I))
+            or soup.find("nav", attrs={"aria-label": re.compile("breadcrumb", re.I)})
+            or soup.find("ul", class_=re.compile("breadcrumb", re.I))
+        )
+        if breadcrumb:
+            crumbs = breadcrumb.find_all("li")
+            # Skip first (Home) and last (current page title), take middle ones
+            middle_crumbs = crumbs[1:-1] if len(crumbs) > 2 else crumbs[1:]
+            for crumb in middle_crumbs:
+                text = crumb.get_text(strip=True)
+                if text and text.lower() not in ("home", ""):
+                    return self._clean_category(text)
+
+        # Strategy 2: Category tag / badge on the page
+        for selector in [
+            {"class": re.compile(r"categor", re.I)},
+            {"class": re.compile(r"tag", re.I)},
+            {"class": re.compile(r"label", re.I)},
+            {"class": re.compile(r"badge", re.I)},
+        ]:
+            tag = soup.find("a", attrs=selector)
+            if tag:
+                text = tag.get_text(strip=True)
+                if text and len(text) > 1:
+                    return self._clean_category(text)
+
+        # Strategy 3: Meta keywords
+        meta_kw = soup.find("meta", attrs={"name": "keywords"})
+        if meta_kw:
+            kw = meta_kw.get("content", "").split(",")
+            if kw and kw[0].strip():
+                return self._clean_category(kw[0].strip())
+
+        # Strategy 4: Extract from URL path e.g. /category/wedding/product...
+        url_match = re.search(r"/category/([^/?#]+)", product_detail_url, re.I)
+        if url_match:
+            return self._clean_category(url_match.group(1))
+
+        log.warning(f"Could not detect category for: {product_detail_url}")
+        return "uncategorized"
+
+    def _clean_category(self, raw: str) -> str:
+        """
+        Normalise a raw category string into a safe folder name.
+        e.g. "Wedding Cards" → "wedding-cards"
+             "Business & Corporate" → "business-corporate"
+        """
+        cleaned = raw.strip().lower()
+        cleaned = re.sub(r"[&+/\\|]", "-", cleaned)   # special chars → dash
+        cleaned = re.sub(r"[^\w\s-]", "", cleaned)    # remove other specials
+        cleaned = re.sub(r"[\s_]+", "-", cleaned)     # spaces/underscores → dash
+        cleaned = re.sub(r"-{2,}", "-", cleaned)      # collapse multiple dashes
+        cleaned = cleaned.strip("-")
+        return cleaned if cleaned else "uncategorized"
+
+    # ── Collect all download links + product detail URLs ──────────────────
+    def get_all_items(self, page_limit: int = 0) -> list[dict]:
+        """
+        Return list of dicts for every item across all listing pages.
+        Each dict: {"download_url": str, "detail_url": str}
 
         Args:
             page_limit: Maximum number of pages to scrape.
-                        0 (default) = no limit — scrape until the site
-                        runs out of pages.
-                        Any positive integer stops after that many pages,
-                        e.g. page_limit=10  → pages 1–10 only.
+                        0 (default) = no limit.
         """
-        download_urls: list[str] = []
+        items: list[dict] = []
+        seen_downloads: set[str] = set()
         page = 1
 
         limit_msg = f"(limit: {page_limit} pages)" if page_limit > 0 else "(no page limit)"
         log.info(f"Starting scrape {limit_msg}")
 
         while True:
-
             # ── Page-limit check ───────────────────────────────────────────
             if page_limit > 0 and page > page_limit:
                 log.info(
                     f"Reached PAGE_LIMIT={page_limit}. "
                     f"Stopping after {page - 1} pages "
-                    f"({len(download_urls)} links collected)."
+                    f"({len(items)} items collected)."
                 )
                 break
 
             url = f"{BASE_URL}/?page={page}"
-            log.info(f"Scraping listing page {page}"
-                     + (f"/{page_limit}" if page_limit > 0 else "")
-                     + f": {url}")
+            log.info(
+                f"Scraping listing page {page}"
+                + (f"/{page_limit}" if page_limit > 0 else "")
+                + f": {url}"
+            )
             soup = self._get(url)
             if soup is None:
                 break
 
-            # ── Collect /download/ links ───────────────────────────────────
-            found = soup.find_all("a", href=re.compile(r"/download/"))
-            if not found:
+            # ── Find download + detail links per card ──────────────────────
+            download_tags = soup.find_all("a", href=re.compile(r"/download/"))
+            if not download_tags:
                 log.info(f"No download links on page {page} – stopping.")
                 break
 
-            for tag in found:
-                href = tag.get("href", "")
-                abs_url = urljoin(BASE_URL, href)
-                if abs_url not in download_urls:
-                    download_urls.append(abs_url)
+            found_this_page = 0
+            for tag in download_tags:
+                dl_href = tag.get("href", "")
+                dl_url  = urljoin(BASE_URL, dl_href)
+                if dl_url in seen_downloads:
+                    continue
+                seen_downloads.add(dl_url)
 
-            log.info(f"  Page {page}: +{len(found)} links  (total {len(download_urls)})")
+                # Find the matching product_detail link in the same card
+                card = tag.find_parent(
+                    lambda t: t.name in ("div", "li", "article")
+                    and t.find("a", href=re.compile(r"/product_detail/"))
+                )
+                detail_url = ""
+                if card:
+                    detail_tag = card.find("a", href=re.compile(r"/product_detail/"))
+                    if detail_tag:
+                        detail_url = urljoin(BASE_URL, detail_tag["href"])
+
+                items.append({"download_url": dl_url, "detail_url": detail_url})
+                found_this_page += 1
+
+            log.info(f"  Page {page}: +{found_this_page} items  (total {len(items)})")
 
             # ── Detect next page ───────────────────────────────────────────
             next_link = soup.find("a", attrs={"rel": "next"})
             if not next_link:
-                # Bootstrap pagination: look for a page-(N+1) link
                 next_link = soup.find(
                     "a", class_="page-link",
                     href=re.compile(rf"[?&]page={page + 1}")
@@ -124,10 +221,15 @@ class ForPSDScraper:
                 break
 
             page += 1
-            time.sleep(0.3)   # polite pause (no rate limit on forpsd.com)
+            time.sleep(0.3)
 
-        log.info(f"Total download URLs collected: {len(download_urls)}")
-        return download_urls
+        log.info(f"Total items collected: {len(items)}")
+        return items
+
+    # ── Legacy helper (kept for compatibility) ─────────────────────────────
+    def get_all_download_urls(self, page_limit: int = 0) -> list[str]:
+        """Return plain list of download URLs (no category info)."""
+        return [item["download_url"] for item in self.get_all_items(page_limit)]
 
     # ── Resolve a /download/eyJ… → Google Drive URL ────────────────────────
     def resolve_drive_url(self, download_url: str) -> str | None:
