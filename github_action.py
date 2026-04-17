@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║         Tamil PSD Marketplace — GitHub Actions Pipeline v1          ║
+║         Tamil PSD Marketplace — GitHub Actions Pipeline v2          ║
 ║  ─────────────────────────────────────────────────────────────────  ║
 ║  1.  Auth Google Drive via OAuth2 refresh token (headless/CI)       ║
 ║  2.  Fetch designs.xlsx from Gurumoorthi repo                       ║
 ║  3.  Scan GDrive PSD folder — subfolders = categories               ║
 ║  4.  Skip already-processed IDs                                     ║
-║  5.  Download PSD → convert to JPG preview                          ║
-║  6.  Upload JPG to backend-sample/preview_image/ → jsDelivr URL     ║
+║  5.  Download PSD → convert to WebP preview (<80KB, watermarked)    ║
+║  6.  Upload WebP to backend-sample/preview_image/ → jsDelivr URL    ║
 ║  7.  Zip PSD → upload to GDRIVE_UPLOAD_FOLDER → download URL        ║
 ║  8.  ModelScope Qwen2.5-VL vision AI → SEO title/tags/description   ║
 ║  9.  Append rows to designs.xlsx                                    ║
@@ -29,7 +29,7 @@ import os, io, sys, re, time, json, base64, zipfile, traceback
 import requests
 import pandas as pd
 from pathlib import Path
-from PIL import Image as PILImage
+from PIL import Image as PILImage, ImageDraw, ImageFont
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -63,6 +63,16 @@ VISION_MODEL   = "Qwen/Qwen2.5-VL-72B-Instruct"
 # ── Processing limits ─────────────────────────────────────────────────────────
 MAX_PER_RUN = 50     # max new files to process per workflow run
 AI_DELAY    = 5      # seconds between AI calls
+
+# ── WebP preview settings ─────────────────────────────────────────────────────
+PREVIEW_MAX_SIZE  = 1280   # max dimension in pixels
+WEBP_TARGET_KB    = 80     # target max file size in KB
+WEBP_QUALITY_START = 82    # starting quality (will reduce to hit target)
+WEBP_QUALITY_MIN   = 30    # minimum quality floor
+
+# ── Watermark ─────────────────────────────────────────────────────────────────
+WATERMARK_TEXT    = "www.tamilpsd.in"
+WATERMARK_OPACITY = 38     # 0-255 (38 ≈ 15% opacity — visible but not obtrusive)
 
 # ── Excel columns ─────────────────────────────────────────────────────────────
 XLSX_HEADERS = [
@@ -240,14 +250,75 @@ def scan_gdrive_structure(root_id: str) -> list:
 
 
 # ╔══════════════════════════════════════════════╗
-# ║         IMAGE CONVERSION                    ║
+# ║         WATERMARK                           ║
 # ╚══════════════════════════════════════════════╝
 
-def to_jpg_bytes(file_bytes: bytes, filename: str,
-                 max_size: int = 1280, quality: int = 85) -> bytes:
-    """Convert any image (including PSD) to JPEG bytes."""
+def add_watermark(img: PILImage.Image) -> PILImage.Image:
+    """
+    Add a diagonal repeating semi-transparent watermark text across the image.
+    Low opacity (protective but not visually overwhelming).
+    """
+    # Work in RGBA for alpha compositing
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+
+    w, h = img.size
+
+    # Create a transparent overlay the same size as the image
+    overlay = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw    = ImageDraw.Draw(overlay)
+
+    # Font size scales with image size — roughly 2.5% of the shorter dimension
+    font_size = max(14, int(min(w, h) * 0.025))
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+    except Exception:
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", font_size)
+        except Exception:
+            font = ImageFont.load_default()
+
+    # Measure text size
+    bbox      = draw.textbbox((0, 0), WATERMARK_TEXT, font=font)
+    txt_w     = bbox[2] - bbox[0]
+    txt_h     = bbox[3] - bbox[1]
+
+    # Tile spacing
+    x_step = txt_w + max(40, int(w * 0.12))
+    y_step = txt_h + max(30, int(h * 0.10))
+
+    # Draw tiles diagonally across the whole image
+    # Start well before (0,0) so rotation doesn't leave gaps at edges
+    for y_start in range(-h, h * 2, y_step):
+        for x_start in range(-w, w * 2, x_step):
+            draw.text(
+                (x_start, y_start),
+                WATERMARK_TEXT,
+                font=font,
+                fill=(255, 255, 255, WATERMARK_OPACITY)
+            )
+
+    # Rotate overlay 30° (diagonal) and composite onto image
+    overlay_rot = overlay.rotate(-30, expand=False, resample=PILImage.BICUBIC)
+    combined    = PILImage.alpha_composite(img, overlay_rot)
+    return combined
+
+
+# ╔══════════════════════════════════════════════╗
+# ║         IMAGE CONVERSION → WebP             ║
+# ╚══════════════════════════════════════════════╝
+
+def to_webp_bytes(file_bytes: bytes, filename: str,
+                  max_size: int = PREVIEW_MAX_SIZE) -> bytes:
+    """
+    Convert any image (including PSD) to WebP bytes.
+    - Adds watermark
+    - Targets < WEBP_TARGET_KB by reducing quality iteratively
+    - Returns empty bytes on failure
+    """
     ext = Path(filename).suffix.lower()
     try:
+        # ── Decode source image ──────────────────────────────────────────────
         if ext in (".psd", ".psb"):
             try:
                 from psd_tools import PSDImage
@@ -261,29 +332,45 @@ def to_jpg_bytes(file_bytes: bytes, filename: str,
         else:
             img = PILImage.open(io.BytesIO(file_bytes))
 
-        # Normalise colour mode
+        # ── Normalise colour mode ────────────────────────────────────────────
         if img.mode not in ("RGB", "RGBA", "L"):
             img = img.convert("RGB")
 
-        # Resize if too large
+        # ── Resize if too large ──────────────────────────────────────────────
         if max(img.size) > max_size:
             img = img.copy()
             img.thumbnail((max_size, max_size), PILImage.LANCZOS)
 
-        # Flatten alpha
-        if img.mode == "RGBA":
-            bg = PILImage.new("RGB", img.size, (255, 255, 255))
-            bg.paste(img, mask=img.split()[3])
-            img = bg
-        elif img.mode != "RGB":
+        # ── Flatten unusual modes ────────────────────────────────────────────
+        if img.mode == "L":
             img = img.convert("RGB")
 
-        buf = io.BytesIO()
-        img.save(buf, "JPEG", quality=quality, optimize=False)
-        return buf.getvalue()
+        # ── Add watermark ────────────────────────────────────────────────────
+        img = add_watermark(img)  # returns RGBA
+
+        # ── Convert back to RGB for WebP saving (no transparency needed) ─────
+        bg = PILImage.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[3])
+        img = bg
+
+        # ── Encode to WebP, reducing quality until < target size ─────────────
+        target_bytes = WEBP_TARGET_KB * 1024
+        quality      = WEBP_QUALITY_START
+
+        while quality >= WEBP_QUALITY_MIN:
+            buf = io.BytesIO()
+            img.save(buf, "WEBP", quality=quality, method=4)
+            webp_data = buf.getvalue()
+            if len(webp_data) <= target_bytes:
+                break
+            quality -= 5  # reduce and retry
+
+        log(f"    ✅ WebP: {format_size(len(webp_data))} @ quality={quality}")
+        return webp_data
 
     except Exception as e:
-        log(f"    ❌ Image conversion failed for {filename}: {e}")
+        log(f"    ❌ WebP conversion failed for {filename}: {e}")
+        traceback.print_exc()
         return b""
 
 
@@ -336,24 +423,60 @@ def github_upload_file(repo: str, path: str, content: bytes,
 
 
 def fetch_designs_xlsx(token: str):
-    """Fetch designs.xlsx from CONTENT_REPO. Returns (DataFrame, sha)."""
+    """
+    Fetch designs.xlsx from CONTENT_REPO. Returns (DataFrame, sha).
+
+    FIX: Previously crashed with BadZipFile when the file did not exist
+    (GitHub returns a JSON 404 body which is not a valid xlsx/zip).
+    Now handles all non-200 responses gracefully and returns an empty DataFrame.
+    """
     url  = f"https://api.github.com/repos/{CONTENT_REPO}/contents/{DESIGNS_PATH}"
     resp = requests.get(url, headers=_gh_headers(token), timeout=30)
-    if resp.status_code == 200:
-        data = resp.json()
-        sha  = data.get("sha")
-        raw  = base64.b64decode(data["content"].replace("\n", ""))
-        df   = pd.read_excel(io.BytesIO(raw), engine="openpyxl", dtype=str).fillna("")
-        for col in XLSX_HEADERS:
-            if col not in df.columns:
-                df[col] = ""
-        df = df[XLSX_HEADERS]
-        for col in XLSX_HEADERS:
-            df[col] = df[col].astype(str).replace("nan", "")
-        log(f"  ✅ designs.xlsx: {len(df)} rows, SHA {str(sha)[:10]}…")
-        return df, sha
-    log(f"  ℹ️  designs.xlsx not found ({resp.status_code}) — will create fresh")
-    return pd.DataFrame(columns=XLSX_HEADERS), None
+
+    # ── File does not exist yet ──────────────────────────────────────────────
+    if resp.status_code == 404:
+        log("  ℹ️  designs.xlsx not found in repo — will create fresh")
+        return pd.DataFrame(columns=XLSX_HEADERS), None
+
+    # ── Any other non-200 HTTP error ─────────────────────────────────────────
+    if resp.status_code != 200:
+        log(f"  ⚠️  designs.xlsx fetch returned HTTP {resp.status_code} — starting fresh")
+        return pd.DataFrame(columns=XLSX_HEADERS), None
+
+    data = resp.json()
+    sha  = data.get("sha")
+
+    # ── Decode and validate the base64 payload before passing to pandas ──────
+    raw_b64 = data.get("content", "")
+    if not raw_b64:
+        log("  ⚠️  designs.xlsx API response had no content field — starting fresh")
+        return pd.DataFrame(columns=XLSX_HEADERS), None
+
+    try:
+        raw = base64.b64decode(raw_b64.replace("\n", ""))
+    except Exception as b64_err:
+        log(f"  ⚠️  designs.xlsx base64 decode failed: {b64_err} — starting fresh")
+        return pd.DataFrame(columns=XLSX_HEADERS), None
+
+    # ── Guard: make sure the decoded bytes look like a ZIP/xlsx before parsing
+    if not raw[:4] == b"PK\x03\x04":
+        log(f"  ⚠️  designs.xlsx bytes do not start with ZIP magic (got {raw[:4]!r}) — starting fresh")
+        return pd.DataFrame(columns=XLSX_HEADERS), None
+
+    try:
+        df = pd.read_excel(io.BytesIO(raw), engine="openpyxl", dtype=str).fillna("")
+    except Exception as xl_err:
+        log(f"  ⚠️  designs.xlsx could not be parsed: {xl_err} — starting fresh")
+        return pd.DataFrame(columns=XLSX_HEADERS), None
+
+    for col in XLSX_HEADERS:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[XLSX_HEADERS]
+    for col in XLSX_HEADERS:
+        df[col] = df[col].astype(str).replace("nan", "")
+    log(f"  ✅ designs.xlsx: {len(df)} rows, SHA {str(sha)[:10]}…")
+    return df, sha
 
 
 def push_designs_xlsx(df: pd.DataFrame, sha, token: str, commit_msg: str):
@@ -705,6 +828,7 @@ def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 3) -> st
     """
     Call ModelScope Qwen2.5-VL with an image and the SEO prompt.
     Returns the raw text response.
+    Note: We still send the image as JPEG base64 to the AI (WebP is for storage).
     """
     full_prompt = (folder_hint.strip() + "\n\n" if folder_hint.strip() else "") + SEO_PROMPT
     headers = {
@@ -750,7 +874,7 @@ def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 3) -> st
 
 def main():
     log("\n" + "═" * 70)
-    log("🚀  Tamil PSD Marketplace — GitHub Actions Pipeline")
+    log("🚀  Tamil PSD Marketplace — GitHub Actions Pipeline v2")
     log("═" * 70)
 
     # ── Validate secrets ─────────────────────────────────────────────────────
@@ -800,7 +924,7 @@ def main():
     log(f"  🔢 Processing {len(to_process)} files this run (limit: {MAX_PER_RUN})")
 
     # ── STEP 3: Process each file ─────────────────────────────────────────────
-    log(f"\n🤖 STEP 3 — Download → Convert → Upload → AI → xlsx")
+    log(f"\n🤖 STEP 3 — Download → Convert → Watermark → WebP → Upload → AI → xlsx")
     new_rows = []
     errors   = 0
 
@@ -816,27 +940,54 @@ def main():
             file_size = format_size(len(raw_bytes))
             log(f"    ✅ Downloaded: {file_size}")
 
-            # ── 3b. Convert to JPG preview ───────────────────────────────────
-            log(f"    🖼️  Converting to JPG…")
-            jpg_bytes = to_jpg_bytes(raw_bytes, filename, max_size=1280, quality=85)
-            if not jpg_bytes:
-                log(f"    ❌ JPG conversion failed — skipping {filename}")
+            # ── 3b. Convert to WebP preview (with watermark) ─────────────────
+            log(f"    🖼️  Converting to WebP (watermarked, <{WEBP_TARGET_KB}KB)…")
+            webp_bytes = to_webp_bytes(raw_bytes, filename, max_size=PREVIEW_MAX_SIZE)
+            if not webp_bytes:
+                log(f"    ❌ WebP conversion failed — skipping {filename}")
                 errors += 1
                 continue
-            log(f"    ✅ JPG: {format_size(len(jpg_bytes))}")
 
-            # ── 3c. Upload JPG to backend-sample/preview_image/ ──────────────
-            jpg_filename = stem + ".jpg"
-            gh_path      = f"{PREVIEW_DIR}/{jpg_filename}"
-            uploaded_ok  = github_upload_file(
-                BACKEND_REPO, gh_path, jpg_bytes, backend_token,
-                f"ci: add preview {jpg_filename}"
+            # ── 3c. Upload WebP to backend-sample/preview_image/ ─────────────
+            webp_filename = stem + ".webp"
+            gh_path       = f"{PREVIEW_DIR}/{webp_filename}"
+            uploaded_ok   = github_upload_file(
+                BACKEND_REPO, gh_path, webp_bytes, backend_token,
+                f"ci: add preview {webp_filename}"
             )
-            preview_url = f"{CDN_BASE}/{jpg_filename}" if uploaded_ok else ""
+            preview_url = f"{CDN_BASE}/{webp_filename}" if uploaded_ok else ""
             if preview_url:
                 log(f"    🔗 jsDelivr: {preview_url}")
 
-            # ── 3d. Zip the original file ────────────────────────────────────
+            # ── 3d. Encode a JPEG version for the AI call ────────────────────
+            # (WebP is for storage; we send JPEG to ModelScope for compatibility)
+            log(f"    🤖 Preparing JPEG for AI vision call…")
+            try:
+                if ext in (".psd", ".psb"):
+                    from psd_tools import PSDImage
+                    psd     = PSDImage.open(io.BytesIO(raw_bytes))
+                    ai_img  = psd.composite() or PILImage.open(io.BytesIO(raw_bytes))
+                else:
+                    ai_img  = PILImage.open(io.BytesIO(raw_bytes))
+                if ai_img.mode not in ("RGB", "RGBA"):
+                    ai_img = ai_img.convert("RGB")
+                if max(ai_img.size) > 1280:
+                    ai_img = ai_img.copy()
+                    ai_img.thumbnail((1280, 1280), PILImage.LANCZOS)
+                if ai_img.mode == "RGBA":
+                    bg = PILImage.new("RGB", ai_img.size, (255, 255, 255))
+                    bg.paste(ai_img, mask=ai_img.split()[3])
+                    ai_img = bg
+                elif ai_img.mode != "RGB":
+                    ai_img = ai_img.convert("RGB")
+                ai_buf = io.BytesIO()
+                ai_img.save(ai_buf, "JPEG", quality=85)
+                jpg_b64 = base64.b64encode(ai_buf.getvalue()).decode()
+            except Exception as ai_prep_err:
+                log(f"    ⚠  AI image prep failed: {ai_prep_err} — using WebP bytes as fallback")
+                jpg_b64 = base64.b64encode(webp_bytes).decode()
+
+            # ── 3e. Zip the original file ────────────────────────────────────
             zip_filename = stem + ".zip"
             log(f"    📦 Zipping → {zip_filename}…")
             zip_buf = io.BytesIO()
@@ -848,20 +999,19 @@ def main():
             zip_bytes = zip_buf.getvalue()
             log(f"    ✅ ZIP: {format_size(len(zip_bytes))}")
 
-            # ── 3e. Upload ZIP to GDrive upload folder ───────────────────────
+            # ── 3f. Upload ZIP to GDrive upload folder ───────────────────────
             log(f"    ☁️  Uploading ZIP to GDrive upload folder…")
             dl_url = gdrive_upload(zip_bytes, zip_filename, GDRIVE_UPLOAD_FOLDER)
             if not dl_url:
                 log(f"    ⚠  ZIP upload failed — dl_url will be empty")
 
-            # ── 3f. ModelScope vision AI ─────────────────────────────────────
+            # ── 3g. ModelScope vision AI ─────────────────────────────────────
             log(f"    🤖 Running AI vision analysis (ModelScope Qwen2.5-VL)…")
-            folder_ctx  = get_folder_context(category)
-            folder_hint = folder_ctx.get("ai_hint", "")
+            folder_ctx   = get_folder_context(category)
+            folder_hint  = folder_ctx.get("ai_hint", "")
             cat_override = folder_ctx.get("category_hint", "")
 
-            jpg_b64 = base64.b64encode(jpg_bytes).decode()
-            ai_raw  = call_modelscope(jpg_b64, folder_hint)
+            ai_raw = call_modelscope(jpg_b64, folder_hint)
 
             title = tags = dims = desc = ""
             if ai_raw:
