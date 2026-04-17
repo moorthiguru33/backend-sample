@@ -168,13 +168,17 @@ def main() -> None:
         try:
             log.info(f"─── Processing: {download_url}")
 
-            # ── 2a: Get category from product detail page ─────────────────
+            # ── 2a: Get category from post title / product detail page ──────
             # Use cached category if already stored in the item dict
             category = item.get("category", "")
             if not category:
-                if detail_url:
-                    log.info(f"  Fetching category from: {detail_url}")
-                    category = scraper.get_category(detail_url)
+                card_title = item.get("card_title", "")
+                if detail_url or card_title:
+                    if card_title:
+                        log.info(f"  Getting category (card_title hint): {card_title!r}")
+                    else:
+                        log.info(f"  Fetching category from: {detail_url}")
+                    category = scraper.get_category(detail_url, hint_title=card_title)
                     # Cache in state so we don't re-fetch on retry
                     for stored_item in state.get("all_items", []):
                         if stored_item.get("download_url") == download_url:
@@ -183,7 +187,7 @@ def main() -> None:
                     state.save()
                 else:
                     category = "uncategorized"
-                    log.warning("  No detail URL — using 'uncategorized'")
+                    log.warning("  No detail URL or card title — using 'uncategorized'")
 
             log.info(f"  Category: [{category}]")
 
