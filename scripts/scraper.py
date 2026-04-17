@@ -350,7 +350,11 @@ class ForPSDScraper:
         return category
 
     # ── Collect all download links + product detail URLs ──────────────────
-    def get_all_items(self, page_limit: int = 0) -> list[dict]:
+    def get_all_items(
+        self,
+        page_limit: int = 0,
+        stop_at_known_urls: "set | None" = None,
+    ) -> list[dict]:
         """
         Return list of dicts for every item across all listing pages.
 
@@ -358,8 +362,15 @@ class ForPSDScraper:
           {
             "download_url": str,
             "detail_url":   str,
-            "card_title":   str,   ← title from listing card (best-effort)
+            "card_title":   str,   <- title from listing card (best-effort)
           }
+
+        stop_at_known_urls (set):
+          When provided, this is an incremental re-scrape.
+          Scraping stops as soon as a full page yields ZERO new URLs —
+          meaning every link on that page is already known.
+          This makes re-scrapes fast: only 1-2 pages are fetched when
+          only a handful of new items have been added to the site.
 
         The card_title is passed as hint_title to get_category() so that
         detail-page fetches are only needed when the card has no title.
@@ -368,15 +379,17 @@ class ForPSDScraper:
         seen_downloads: set[str] = set()
         page = 1
 
-        limit_msg = f"(limit: {page_limit} pages)" if page_limit > 0 else "(no page limit)"
-        log.info(f"Starting scrape {limit_msg}")
+        incremental = stop_at_known_urls is not None
+        limit_msg   = f"(limit: {page_limit} pages)" if page_limit > 0 else "(no page limit)"
+        mode_msg    = " [incremental — stops at known territory]" if incremental else ""
+        log.info(f"Starting scrape {limit_msg}{mode_msg}")
 
         while True:
             if page_limit > 0 and page > page_limit:
                 log.info(
                     f"Reached PAGE_LIMIT={page_limit}. "
                     f"Stopping after {page - 1} pages "
-                    f"({len(items)} items collected)."
+                    f"({len(items)} new items collected)."
                 )
                 break
 
@@ -395,13 +408,17 @@ class ForPSDScraper:
                 log.info(f"No download links on page {page} – stopping.")
                 break
 
-            found_this_page = 0
+            new_this_page = 0
             for tag in download_tags:
                 dl_href = tag.get("href", "")
                 dl_url  = urljoin(BASE_URL, dl_href)
                 if dl_url in seen_downloads:
                     continue
                 seen_downloads.add(dl_url)
+
+                # Incremental mode: skip URLs we already have in state
+                if incremental and dl_url in stop_at_known_urls:
+                    continue
 
                 card = tag.find_parent(
                     lambda t: t.name in ("div", "li", "article")
@@ -420,9 +437,18 @@ class ForPSDScraper:
                     "detail_url":   detail_url,
                     "card_title":   card_title,
                 })
-                found_this_page += 1
+                new_this_page += 1
 
-            log.info(f"  Page {page}: +{found_this_page} items  (total {len(items)})")
+            log.info(f"  Page {page}: +{new_this_page} new items  (running total {len(items)})")
+
+            # Early stop: in incremental mode, if this page had zero new items
+            # every further page will also be all-known — no need to continue.
+            if incremental and new_this_page == 0:
+                log.info(
+                    f"  Page {page} had no new URLs — "
+                    "stopping incremental scrape early."
+                )
+                break
 
             next_link = soup.find("a", attrs={"rel": "next"})
             if not next_link:
@@ -437,8 +463,9 @@ class ForPSDScraper:
             page += 1
             time.sleep(0.3)
 
-        log.info(f"Total items collected: {len(items)}")
+        log.info(f"Total new items collected: {len(items)}")
         return items
+
 
     def _extract_card_title(self, card) -> str:
         """

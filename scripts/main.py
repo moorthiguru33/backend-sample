@@ -2,39 +2,33 @@
 main.py – Orchestrator (category-aware upload, continuous file counter).
 
 Flow per run:
-  1. Scrape all listing pages → collect {download_url, detail_url} items
-     (first run only — stored in state.json).
-  2. Loop over pending items until the 5.5 h deadline OR ITEM_LIMIT reached:
+  1. Scrape listing pages to collect {download_url, detail_url} items.
+     - First run (state is empty): full scrape of all pages.
+     - Pending items exist: skip scrape, use existing state.
+     - All known items done: INCREMENTAL re-scrape (stops early once it
+       hits a page of already-known URLs). Fast — usually 1-2 pages only.
+
+  2. Loop over pending items until ITEM_LIMIT reached or no more pending:
        a. Resolve category from product detail page (or cached in state).
-       b. Resolve /download/eyJ… → Google Drive URL.
+       b. Resolve /download/eyJ… -> Google Drive URL.
        c. Download archive (ZIP/RAR/7Z).
-       d. Extract → rename files to tamilpsd-XXXX (global counter, continuous).
-       e. Upload renamed PSD/TIF files into:
-            GDRIVE_PSD_FOLDER / <category> /   ← e.g. psd/wedding/
-       f. Mark URL as processed, save file counter to state.
+       d. Extract -> rename files to tamilpsd-XXXX (global counter, continuous).
+       e. Upload renamed PSD/TIF files into GDRIVE_PSD_FOLDER/<category>/
+       f. Mark URL as processed, persist file counter to state.
 
 File counter continuity:
-  Counter is global across ALL categories.
-  If category "wedding" ends at tamilpsd-2548, the next item (any category)
-  starts at tamilpsd-2549. The counter is persisted in state.json.
+  Counter is global across ALL categories and ALL runs.
+  If 500 items are done and counter is at tamilpsd-0738, the next run
+  continues at tamilpsd-0739 — persisted in state.json.
+
+ITEM_LIMIT behaviour:
+  0   -> process everything pending (default; also triggers auto-continue)
+  N>0 -> process exactly N items then stop (no auto-continue triggered)
 
 Skip logic (two layers):
-  • state.json  – skips URLs already fully processed in a previous run.
-  • Drive check – uploader skips individual files that already exist on Drive
-                  (handles interrupted runs where the state wasn't committed).
-
-Folder structure created on Drive:
-  GDRIVE_PSD_FOLDER/
-    wedding/
-      tamilpsd-0001.psd
-      tamilpsd-0002.psd
-    birthday/
-      tamilpsd-0003.psd
-    business-cards/
-      tamilpsd-0004.psd
-      tamilpsd-0005.psd
-    uncategorized/
-      tamilpsd-0006.psd
+  - state.json  : skips URLs already fully processed in a previous run.
+  - Drive check : uploader skips individual files already on Drive
+                  (handles interrupted runs where state was not committed).
 """
 
 import logging
@@ -84,6 +78,63 @@ def check_secrets() -> bool:
     return True
 
 
+def _full_scrape(scraper: ForPSDScraper, state: StateManager) -> None:
+    """
+    First-time full scrape. Populates state all_items from scratch.
+    Called only when state has no all_items yet.
+    """
+    limit_msg = f"first {PAGE_LIMIT} pages" if PAGE_LIMIT > 0 else "all pages"
+    log.info(f"First run – full scrape ({limit_msg}) ...")
+
+    all_items = scraper.get_all_items(page_limit=PAGE_LIMIT)
+    if not all_items:
+        log.error("Could not scrape any items. Check FORPSD_COOKIE secret.")
+        sys.exit(2)
+
+    state.set("all_items", all_items)
+    state.set("all_urls", [item["download_url"] for item in all_items])
+    state.set("processed", [])
+    state.save()
+    log.info(f"Collected {len(all_items)} items -> saved to state.json")
+
+
+def _incremental_scrape(scraper: ForPSDScraper, state: StateManager) -> int:
+    """
+    Re-scrape to find items added to the site since our last scrape.
+
+    Passes the set of already-known URLs to get_all_items() so it stops
+    scraping as soon as it hits a page where every URL is already known.
+    Typically only 1-2 pages are fetched even on a site with thousands of items.
+
+    Returns the number of newly discovered items (0 = site has nothing new).
+    """
+    existing_urls: set[str] = {
+        item.get("download_url", "")
+        for item in state.get("all_items", [])
+    }
+
+    log.info(
+        f"All {len(existing_urls)} known items are done. "
+        "Incremental re-scrape to check for new items on site ..."
+    )
+
+    new_items = scraper.get_all_items(
+        page_limit=PAGE_LIMIT,
+        stop_at_known_urls=existing_urls,
+    )
+
+    if not new_items:
+        return 0
+
+    all_items: list = state.get("all_items", [])
+    all_items.extend(new_items)
+    state.set("all_items", all_items)
+    state.set("all_urls", [i["download_url"] for i in all_items])
+    state.save()
+    log.info(f"Found {len(new_items)} new item(s) -> added to state.json")
+    return len(new_items)
+
+
 def main() -> None:
     if not check_secrets():
         sys.exit(2)
@@ -104,62 +155,34 @@ def main() -> None:
     scraper  = ForPSDScraper(FORPSD_COOKIE)
     uploader = DriveUploader(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN)
 
-    # ── Phase 1: collect all items (first run only) ────────────────────────
+    # ── Phase 1: Ensure we have pending items ─────────────────────────────
     if not state.get("all_items"):
-        limit_msg = f"first {PAGE_LIMIT} pages" if PAGE_LIMIT > 0 else "all pages"
-        log.info(f"First run – scraping {limit_msg} …")
+        # Truly first run — nothing in state at all
+        _full_scrape(scraper, state)
+    else:
+        pending_check = state.pending_items()
+        if not pending_check:
+            # All currently-known items are done. Check if the site has more.
+            found_new = _incremental_scrape(scraper, state)
+            if found_new == 0:
+                log.info("No new items found on site. Everything is done!")
+                Path(DONE_FILE).touch()
+                return
 
-        all_items = scraper.get_all_items(page_limit=PAGE_LIMIT)
-        if not all_items:
-            log.error("Could not scrape any items. Check FORPSD_COOKIE secret.")
-            sys.exit(2)
-
-        state.set("all_items", all_items)
-        # Also keep legacy all_urls for state summary compatibility
-        state.set("all_urls", [item["download_url"] for item in all_items])
-        state.set("processed", [])
-        state.save()
-        log.info(f"Collected {len(all_items)} items → saved to state.json")
-
+    # ── Reload pending list (may have grown after incremental scrape) ──────
     pending = state.pending_items()
     log.info(f"State: {state.summary()}")
 
     if not pending:
-        # All KNOWN items are done — re-scrape to check for newly added items
-        limit_msg = f"first {PAGE_LIMIT} pages" if PAGE_LIMIT > 0 else "all pages"
-        log.info(f"All known items processed. Re-scraping ({limit_msg}) to check for new items …")
+        log.info("Nothing pending — exiting.")
+        Path(DONE_FILE).touch()
+        return
 
-        refreshed_items = scraper.get_all_items(page_limit=PAGE_LIMIT)
-
-        existing_urls = {
-            item.get("download_url", "")
-            for item in state.get("all_items", [])
-        }
-        truly_new = [
-            item for item in refreshed_items
-            if item.get("download_url") and item["download_url"] not in existing_urls
-        ]
-
-        if truly_new:
-            all_items = state.get("all_items", [])
-            all_items.extend(truly_new)
-            state.set("all_items", all_items)
-            state.set("all_urls", [i["download_url"] for i in all_items])
-            state.save()
-            log.info(f"Found {len(truly_new)} new item(s) → added to state.json")
-            pending = state.pending_items()
-        else:
-            log.info("🎉 No new items found on site. All done!")
-            Path(DONE_FILE).touch()
-            return
-
-    # ── Global file counter — persisted across ALL runs and ALL categories ──
-    # This ensures continuous numbering: tamilpsd-0001 … tamilpsd-9999+
-    # regardless of category changes between items.
+    # ── Global file counter — persisted across ALL runs & categories ───────
     file_counter: int = state.get("file_counter", 1)
-    log.info(f"File counter starts at: {file_counter}  (next → tamilpsd-{file_counter:04d})")
+    log.info(f"File counter starts at: {file_counter}  (next -> tamilpsd-{file_counter:04d})")
 
-    # ── Phase 2: process pending items ────────────────────────────────────
+    # ── Phase 2: Process pending items ────────────────────────────────────
     processed_this_run = 0
     errors_this_run    = 0
 
@@ -171,16 +194,17 @@ def main() -> None:
         # ── Time limit ────────────────────────────────────────────────────
         if datetime.utcnow() >= deadline:
             log.info(
-                f"⏰ Time limit reached. "
+                f"Time limit reached. "
                 f"Processed {processed_this_run} this run. "
                 f"Remaining: {len(state.pending_items())}"
             )
             break
 
-        # ── Item limit ────────────────────────────────────────────────────
+        # ── Item limit — checked BEFORE starting each item ─────────────
+        # If ITEM_LIMIT=1 and processed_this_run=1, we stop here immediately.
         if ITEM_LIMIT > 0 and processed_this_run >= ITEM_LIMIT:
             log.info(
-                f"✋ Item limit ({ITEM_LIMIT}) reached. "
+                f"Item limit ({ITEM_LIMIT}) reached. "
                 f"Processed {processed_this_run} this run. "
                 f"Remaining: {len(state.pending_items())}"
             )
@@ -190,10 +214,9 @@ def main() -> None:
         item_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            log.info(f"─── Processing: {download_url}")
+            log.info(f"--- Processing: {download_url}")
 
-            # ── 2a: Get category from post title / product detail page ──────
-            # Use cached category if already stored in the item dict
+            # ── 2a: Resolve category ──────────────────────────────────────
             category = item.get("category", "")
             if not category:
                 card_title = item.get("card_title", "")
@@ -203,7 +226,7 @@ def main() -> None:
                     else:
                         log.info(f"  Fetching category from: {detail_url}")
                     category = scraper.get_category(detail_url, hint_title=card_title)
-                    # Cache in state so we don't re-fetch on retry
+                    # Cache so we never re-fetch on retry
                     for stored_item in state.get("all_items", []):
                         if stored_item.get("download_url") == download_url:
                             stored_item["category"] = category
@@ -232,7 +255,7 @@ def main() -> None:
                 errors_this_run += 1
                 continue
 
-            # ── 2d: Process (extract → rename with global counter) ────────
+            # ── 2d: Extract and rename with global counter ─────────────────
             result = process_archive(
                 archive_path=archive,
                 work_dir=item_dir / "process",
@@ -245,13 +268,11 @@ def main() -> None:
 
             renamed_files, next_index = result
 
-            # ── 2e: Upload renamed PSD/TIF → category subfolder ───────────
-            # Files go into:  GDRIVE_PSD_FOLDER / <category> /
-            # Folder is auto-created on Drive if it does not exist.
+            # ── 2e: Upload to Drive category subfolder ─────────────────────
             uploaded_count = 0
             for orig in renamed_files:
                 if orig.exists():
-                    log.info(f"  Uploading: {orig.name}  → [{category}/]")
+                    log.info(f"  Uploading: {orig.name}  -> [{category}/]")
                     upload_result = uploader.upload_to_category(
                         file_path=orig,
                         parent_folder_id=GDRIVE_PSD_FOLDER,
@@ -260,15 +281,15 @@ def main() -> None:
                     if not upload_result.get("skipped"):
                         uploaded_count += 1
                 else:
-                    log.warning(f"  PSD file missing after rename: {orig}")
+                    log.warning(f"  File missing after rename: {orig}")
 
-            # ── 2f: Update global counter and mark done ───────────────────
+            # ── 2f: Persist counter and mark item done ─────────────────────
             file_counter = next_index
             state.set("file_counter", file_counter)
             state.mark_processed(download_url)
             processed_this_run += 1
             log.info(
-                f"  ✅ Done ({processed_this_run} this run). "
+                f"  Done ({processed_this_run} this run). "
                 f"Category=[{category}] | "
                 f"Uploaded {uploaded_count} file(s). "
                 f"Next file counter: tamilpsd-{file_counter:04d}. "
@@ -294,10 +315,10 @@ def main() -> None:
     )
 
     if remaining == 0:
-        log.info("🎉 All items processed! Touching ALL_DONE to stop automation.")
+        log.info("All items processed! Touching ALL_DONE to stop automation.")
         Path(DONE_FILE).touch()
     else:
-        log.info("Items still pending – next run will be triggered automatically.")
+        log.info("Items still pending – next run will continue from here.")
 
 
 if __name__ == "__main__":
