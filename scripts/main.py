@@ -3,13 +3,13 @@ main.py – Orchestrator (updated workflow).
 
 Flow per run:
   1. Scrape all listing pages → collect download URLs (first run only).
-  2. Loop over pending URLs until the 5.5 h deadline:
+  2. Loop over pending URLs until the 5.5 h deadline OR ITEM_LIMIT reached:
        a. Resolve /download/eyJ… → Google Drive URL.
        b. Download archive (ZIP/RAR).
-       c. Extract → create WebP with watermark (no layer deletion).
-       d. Upload original PSD/TIF files → GDRIVE_PSD_FOLDER   (psd/)
-       e. Upload WebP previews          → GDRIVE_WEBP_FOLDER  (preview/)
-       f. Mark URL as processed and save state.
+       c. Extract → rename to tamilpsd-XXXX → create WebP with watermark.
+       d. Upload renamed PSD/TIF files → GDRIVE_PSD_FOLDER   (psd/)
+       e. Upload WebP previews          → GDRIVE_WEBP_FOLDER (preview/)
+       f. Mark URL as processed, save file counter to state.
   3. If all done, touch ALL_DONE (stops self-triggering).
   4. Otherwise exit normally – workflow sleeps 10 min then re-triggers.
 """
@@ -27,7 +27,7 @@ from config import (
     FORPSD_COOKIE,
     GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN,
     GDRIVE_PSD_FOLDER, GDRIVE_WEBP_FOLDER,
-    RUN_MINUTES, PAGE_LIMIT, WORK_DIR, STATE_FILE, DONE_FILE, LOG_FILE,
+    RUN_MINUTES, PAGE_LIMIT, ITEM_LIMIT, WORK_DIR, STATE_FILE, DONE_FILE, LOG_FILE,
 )
 from state_manager import StateManager
 from scraper import ForPSDScraper
@@ -72,6 +72,10 @@ def main() -> None:
     log.info("=" * 70)
     log.info(f"Run started at {start_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     log.info(f"Will work until {deadline.strftime('%H:%M:%S UTC')}  ({RUN_MINUTES} min)")
+    if ITEM_LIMIT > 0:
+        log.info(f"Item limit this run: {ITEM_LIMIT}")
+    else:
+        log.info("Item limit: unlimited")
     log.info("=" * 70)
 
     work_root = Path(WORK_DIR)
@@ -102,15 +106,30 @@ def main() -> None:
         Path(DONE_FILE).touch()
         return
 
+    # ── File counter — persisted across runs for sequential tamilpsd naming ─
+    # Starts at 1 on the very first run and increments with every file.
+    file_counter: int = state.get("file_counter", 1)
+    log.info(f"File counter starts at: {file_counter}  (next file → tamilpsd-{file_counter:04d})")
+
     # ── Phase 2: process pending items ────────────────────────────────────
     processed_this_run = 0
     errors_this_run    = 0
 
     for download_url in pending:
 
+        # ── Time limit ────────────────────────────────────────────────────
         if datetime.utcnow() >= deadline:
             log.info(
                 f"⏰ Time limit reached. "
+                f"Processed {processed_this_run} this run. "
+                f"Remaining: {len(state.pending_urls())}"
+            )
+            break
+
+        # ── Item limit ────────────────────────────────────────────────────
+        if ITEM_LIMIT > 0 and processed_this_run >= ITEM_LIMIT:
+            log.info(
+                f"✋ Item limit ({ITEM_LIMIT}) reached. "
                 f"Processed {processed_this_run} this run. "
                 f"Remaining: {len(state.pending_urls())}"
             )
@@ -139,25 +158,26 @@ def main() -> None:
                 errors_this_run += 1
                 continue
 
-            # ── 2c: Process (extract → watermark WebP, no layer delete) ───
+            # ── 2c: Process (extract → rename → watermark WebP) ───────────
             result = process_archive(
                 archive_path=archive,
                 work_dir=item_dir / "process",
+                start_index=file_counter,
             )
             if not result:
                 log.error(f"  Processing failed for {archive.name} – skipping")
                 errors_this_run += 1
                 continue
 
-            original_files, webp_list = result
+            renamed_files, webp_list, next_index = result
 
-            # ── 2d: Upload original PSD/TIF → psd/ folder ────────────────
-            for orig in original_files:
+            # ── 2d: Upload renamed PSD/TIF → psd/ folder ─────────────────
+            for orig in renamed_files:
                 if orig.exists():
-                    log.info(f"  Uploading original: {orig.name}")
+                    log.info(f"  Uploading PSD: {orig.name}")
                     uploader.upload(orig, GDRIVE_PSD_FOLDER)
                 else:
-                    log.warning(f"  Original file missing: {orig}")
+                    log.warning(f"  PSD file missing: {orig}")
 
             # ── 2e: Upload WebP previews → preview/ folder ────────────────
             for webp in webp_list:
@@ -165,11 +185,14 @@ def main() -> None:
                     log.info(f"  Uploading WebP: {webp.name}")
                     uploader.upload(webp, GDRIVE_WEBP_FOLDER)
 
-            # ── 2f: Mark done ──────────────────────────────────────────────
+            # ── 2f: Update counter and mark done ─────────────────────────
+            file_counter = next_index
+            state.set("file_counter", file_counter)
             state.mark_processed(download_url)
             processed_this_run += 1
             log.info(
                 f"  ✅ Done ({processed_this_run} this run). "
+                f"Next file counter: {file_counter}. "
                 f"State: {state.summary()}"
             )
 
@@ -187,7 +210,8 @@ def main() -> None:
     remaining = len(state.pending_urls())
     log.info(
         f"Run finished. Processed={processed_this_run}, "
-        f"Errors={errors_this_run}, Remaining={remaining}"
+        f"Errors={errors_this_run}, Remaining={remaining}, "
+        f"Next file counter={file_counter}"
     )
 
     if remaining == 0:
