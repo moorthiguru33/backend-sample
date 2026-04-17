@@ -1,17 +1,17 @@
 """
-main.py – Orchestrator.
+main.py – Orchestrator (updated workflow).
 
 Flow per run:
-  1. If state has no URLs yet → scrape all listing pages to collect them.
+  1. Scrape all listing pages → collect download URLs (first run only).
   2. Loop over pending URLs until the 5.5 h deadline:
-       a. Resolve /download/eyJ… → Google Drive URL
-       b. Download archive (ZIP/RAR)
-       c. Extract → delete top layer → create WebP with watermark → re-zip
-       d. Upload ZIP to GDRIVE_PSD_FOLDER
-       e. Upload WebP(s) to GDRIVE_WEBP_FOLDER
-       f. Mark URL as processed and save state
-  3. If all done, touch ALL_DONE (workflow stops self-triggering).
-  4. Otherwise exit normally – the workflow sleeps 10 min then re-triggers.
+       a. Resolve /download/eyJ… → Google Drive URL.
+       b. Download archive (ZIP/RAR).
+       c. Extract → create WebP with watermark (no layer deletion).
+       d. Upload original PSD/TIF files → GDRIVE_PSD_FOLDER   (psd/)
+       e. Upload WebP previews          → GDRIVE_WEBP_FOLDER  (preview/)
+       f. Mark URL as processed and save state.
+  3. If all done, touch ALL_DONE (stops self-triggering).
+  4. Otherwise exit normally – workflow sleeps 10 min then re-triggers.
 """
 
 import logging
@@ -21,7 +21,6 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# ── bring scripts/ into sys.path ──────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import (
@@ -47,14 +46,10 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  Validation helpers
-# ═══════════════════════════════════════════════════════════════════════════
-
 def check_secrets() -> bool:
     missing = []
-    if not FORPSD_COOKIE:    missing.append("FORPSD_COOKIE")
-    if not GDRIVE_SA_JSON:   missing.append("GDRIVE_SA_JSON")
+    if not FORPSD_COOKIE:      missing.append("FORPSD_COOKIE")
+    if not GDRIVE_SA_JSON:     missing.append("GDRIVE_SA_JSON")
     if not GDRIVE_PSD_FOLDER:  missing.append("GDRIVE_PSD_FOLDER")
     if not GDRIVE_WEBP_FOLDER: missing.append("GDRIVE_WEBP_FOLDER")
     if missing:
@@ -62,10 +57,6 @@ def check_secrets() -> bool:
         return False
     return True
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  Main
-# ═══════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
     if not check_secrets():
@@ -82,7 +73,6 @@ def main() -> None:
     work_root = Path(WORK_DIR)
     work_root.mkdir(parents=True, exist_ok=True)
 
-    # ── Components ─────────────────────────────────────────────────────────
     state    = StateManager(STATE_FILE)
     scraper  = ForPSDScraper(FORPSD_COOKIE)
     uploader = DriveUploader(GDRIVE_SA_JSON)
@@ -90,7 +80,7 @@ def main() -> None:
     # ── Phase 1: collect all URLs (first run only) ─────────────────────────
     if not state.get("all_urls"):
         limit_msg = f"first {PAGE_LIMIT} pages" if PAGE_LIMIT > 0 else "all pages"
-        log.info(f"First run detected – scraping {limit_msg} …")
+        log.info(f"First run – scraping {limit_msg} …")
         all_urls = scraper.get_all_download_urls(page_limit=PAGE_LIMIT)
         if not all_urls:
             log.error("Could not scrape any URLs. Check FORPSD_COOKIE secret.")
@@ -98,7 +88,7 @@ def main() -> None:
         state.set("all_urls", all_urls)
         state.set("processed", [])
         state.save()
-        log.info(f"Collected {len(all_urls)} download URLs and saved to state.json")
+        log.info(f"Collected {len(all_urls)} download URLs → saved to state.json")
 
     pending = state.pending_urls()
     log.info(f"State: {state.summary()}")
@@ -114,11 +104,10 @@ def main() -> None:
 
     for download_url in pending:
 
-        # Time check
         if datetime.utcnow() >= deadline:
             log.info(
                 f"⏰ Time limit reached. "
-                f"Processed {processed_this_run} items this run. "
+                f"Processed {processed_this_run} this run. "
                 f"Remaining: {len(state.pending_urls())}"
             )
             break
@@ -132,21 +121,21 @@ def main() -> None:
             # ── 2a: Resolve Google Drive URL ──────────────────────────────
             drive_url = scraper.resolve_drive_url(download_url)
             if not drive_url:
-                log.warning(f"  No Drive URL – skipping (will retry next run)")
+                log.warning("  No Drive URL – skipping (will retry next run)")
                 errors_this_run += 1
                 continue
 
             log.info(f"  Drive URL: {drive_url}")
 
             # ── 2b: Download archive ──────────────────────────────────────
-            dl_dir   = item_dir / "download"
-            archive  = download_from_drive(drive_url, dl_dir)
+            dl_dir  = item_dir / "download"
+            archive = download_from_drive(drive_url, dl_dir)
             if not archive:
-                log.error(f"  Download failed – skipping")
+                log.error("  Download failed – skipping")
                 errors_this_run += 1
                 continue
 
-            # ── 2c: Process (extract → layer delete → watermark → zip) ────
+            # ── 2c: Process (extract → watermark WebP, no layer delete) ───
             result = process_archive(
                 archive_path=archive,
                 work_dir=item_dir / "process",
@@ -156,17 +145,20 @@ def main() -> None:
                 errors_this_run += 1
                 continue
 
-            new_zip, webp_list = result
+            original_files, webp_list = result
 
-            # ── 2d: Upload ZIP ─────────────────────────────────────────────
-            if new_zip and new_zip.exists():
-                uploader.upload(new_zip, GDRIVE_PSD_FOLDER)
-            else:
-                log.warning("  ZIP not found after processing")
+            # ── 2d: Upload original PSD/TIF → psd/ folder ────────────────
+            for orig in original_files:
+                if orig.exists():
+                    log.info(f"  Uploading original: {orig.name}")
+                    uploader.upload(orig, GDRIVE_PSD_FOLDER)
+                else:
+                    log.warning(f"  Original file missing: {orig}")
 
-            # ── 2e: Upload WebP(s) ─────────────────────────────────────────
+            # ── 2e: Upload WebP previews → preview/ folder ────────────────
             for webp in webp_list:
                 if webp.exists():
+                    log.info(f"  Uploading WebP: {webp.name}")
                     uploader.upload(webp, GDRIVE_WEBP_FOLDER)
 
             # ── 2f: Mark done ──────────────────────────────────────────────
@@ -182,10 +174,9 @@ def main() -> None:
             errors_this_run += 1
 
         finally:
-            # Always clean up temp files to avoid disk-full
             shutil.rmtree(item_dir, ignore_errors=True)
 
-    # ── Final state save ───────────────────────────────────────────────────
+    # ── Final ──────────────────────────────────────────────────────────────
     state.set("last_run", datetime.utcnow().isoformat())
     state.save()
 
