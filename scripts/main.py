@@ -18,23 +18,35 @@ Flow per run:
 
 File counter continuity:
   Counter is global across ALL categories and ALL runs.
-  If 500 items are done and counter is at tamilpsd-0738, the next run
-  continues at tamilpsd-0739 — persisted in state.json.
+  On startup, counter = max(state.json value, Drive scan max, Excel log max) + 1
+  so even a lost state.json cannot cause collisions.
 
 ITEM_LIMIT behaviour:
   0   -> process everything pending (default; also triggers auto-continue)
   N>0 -> process exactly N items then stop (no auto-continue triggered)
 
-Skip logic (two layers):
-  - state.json  : skips URLs already fully processed in a previous run.
-  - Drive check : uploader skips individual files already on Drive
-                  (handles interrupted runs where state was not committed).
+Skip logic (three layers, fastest-first):
+  - Excel log  : skip files whose original OR renamed name is already logged.
+                 Zero API calls — purely in-memory after initial load.
+  - state.json : skip URLs already fully processed in a previous run.
+  - Drive check: skip individual files already on Drive
+                 (handles interrupted runs where state was not committed).
+
+Excel log (rename_log.xlsx):
+  Path: <WORK_DIR>/rename_log.xlsx
+  Col A "Original File Name" – filename inside the source archive.
+  Col B "Renamed File Name"  – assigned tamilpsd-XXXX name.
+  Written immediately after each successful upload — crash-safe.
+  Loaded at startup to rebuild in-memory skip sets.
 """
 
 import logging
 import shutil
 import sys
 import time
+import zipfile
+import rarfile
+import py7zr
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -51,10 +63,13 @@ from scraper import ForPSDScraper
 from downloader import download_from_drive
 from processor import process_archive
 from uploader import DriveUploader
+from excel_tracker import ExcelTracker
 
 # How many posts forpsd.com shows per listing page.
-# Used to calculate which page the next pending items are on.
 POSTS_PER_PAGE: int = 17
+
+# Excel tracker file lives next to state.json so it persists across runs.
+EXCEL_LOG_FILE: str = str(Path(STATE_FILE).parent / "rename_log.xlsx")
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -86,34 +101,10 @@ def _smart_scrape(scraper: ForPSDScraper, state: StateManager, item_limit: int) 
     """
     Targeted scrape: fetch ONLY the listing pages that contain the next
     `item_limit` unprocessed items.
-
-    Logic
-    -----
-    Each forpsd.com listing page has POSTS_PER_PAGE (17) items.
-    If N items are already done, the next unprocessed item is at
-    position N (0-indexed), which lives on page:
-
-        start_page = (done_count // POSTS_PER_PAGE) + 1
-
-    Examples
-    --------
-        done=0   → start_page=1   (first 17 items are on page 1)
-        done=17  → start_page=2   (items 18-34 are on page 2)
-        done=30  → start_page=2   (item 31 is on page 2, 32-34 too, 35+ on page 3)
-        done=34  → start_page=3   (items 35-51 are on page 3)
-
-    For ITEM_LIMIT=2 with 34 already done, we only scrape page 3
-    and stop the moment we have 2 new items — never touching pages 4-400+.
-
-    For ITEM_LIMIT=0 (unlimited), we start at start_page and scrape
-    to the end — still much smarter than always starting at page 1.
-
-    Returns the number of new items added to state.
     """
     done_count = len(state.get("processed", []))
     start_page = (done_count // POSTS_PER_PAGE) + 1
 
-    # URLs already known — skip them so we don't re-add to state
     known_urls: set[str] = {
         item.get("download_url", "")
         for item in state.get("all_items", [])
@@ -128,7 +119,7 @@ def _smart_scrape(scraper: ForPSDScraper, state: StateManager, item_limit: int) 
         page_limit=PAGE_LIMIT,
         stop_at_known_urls=known_urls if known_urls else None,
         start_page=start_page,
-        max_new_items=item_limit,          # 0 = no cap (scrape to end)
+        max_new_items=item_limit,
     )
 
     if not new_items:
@@ -144,6 +135,49 @@ def _smart_scrape(scraper: ForPSDScraper, state: StateManager, item_limit: int) 
         f"(total known: {len(all_items)})"
     )
     return len(new_items)
+
+
+# ── Archive original-name extraction ──────────────────────────────────────
+
+def _list_archive_originals(archive_path: Path) -> list[str]:
+    """
+    Return all PSD/TIF/TIFF filenames (original names) inside the archive,
+    in the order they would be extracted by process_archive.
+
+    Used to build the original_name → renamed_name mapping for the Excel log.
+    Supports ZIP, RAR, and 7Z formats.  Returns [] on any error.
+    """
+    TARGET_EXT = {".psd", ".tif", ".tiff"}
+    names: list[str] = []
+
+    try:
+        suffix = archive_path.suffix.lower()
+
+        if suffix == ".zip":
+            with zipfile.ZipFile(archive_path) as zf:
+                for info in zf.infolist():
+                    p = Path(info.filename)
+                    if p.suffix.lower() in TARGET_EXT and not info.is_dir():
+                        names.append(p.name)
+
+        elif suffix == ".rar":
+            with rarfile.RarFile(archive_path) as rf:
+                for info in rf.infolist():
+                    p = Path(info.filename)
+                    if p.suffix.lower() in TARGET_EXT and not info.is_dir():
+                        names.append(p.name)
+
+        elif suffix in (".7z",):
+            with py7zr.SevenZipFile(archive_path, mode="r") as sz:
+                for entry in sz.list():
+                    p = Path(entry.filename)
+                    if p.suffix.lower() in TARGET_EXT and not entry.is_directory:
+                        names.append(p.name)
+
+    except Exception as exc:
+        log.warning(f"  Could not list archive originals for {archive_path.name}: {exc}")
+
+    return names
 
 
 def main() -> None:
@@ -166,12 +200,18 @@ def main() -> None:
     scraper  = ForPSDScraper(FORPSD_COOKIE)
     uploader = DriveUploader(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN)
 
+    # ── Load Excel tracker ─────────────────────────────────────────────────
+    # Reads rename_log.xlsx once; builds in-memory sets for O(1) skip checks.
+    tracker = ExcelTracker(EXCEL_LOG_FILE)
+    log.info(f"📊 Excel tracker: {tracker.stats()}")
+
+    # ── Preload all existing Drive filenames (cross-subfolder duplicate guard)
+    uploader.preload_existing_names(GDRIVE_PSD_FOLDER)
+
     # ── Phase 1: Ensure we have pending items ─────────────────────────────
     pending = state.pending_items()
 
     if not pending:
-        # Either truly first run (state empty) or all known items are done.
-        # Either way: smart-scrape to fetch exactly the pages we need.
         if not state.get("all_items"):
             log.info("First run — smart scrape for initial batch ...")
         else:
@@ -194,9 +234,27 @@ def main() -> None:
         Path(DONE_FILE).touch()
         return
 
-    # ── Global file counter — persisted across ALL runs & categories ───────
-    file_counter: int = state.get("file_counter", 1)
-    log.info(f"File counter starts at: {file_counter}  (next -> tamilpsd-{file_counter:04d})")
+    # ── Global file counter — synced from ALL sources ──────────────────────
+    # Use the maximum of:
+    #   • state.json value           (normal run-to-run continuity)
+    #   • Drive scan max + 1         (handles lost state.json)
+    #   • Excel log max + 1          (NEW: most reliable source of truth)
+    # This guarantees the counter is always ABOVE any existing file on Drive
+    # regardless of which state sources have been lost or reset.
+    file_counter: int = max(
+        state.get("file_counter", 1),
+        uploader.max_counter + 1,
+        tracker.max_counter + 1,
+    )
+    state.set("file_counter", file_counter)
+    state.save()
+    log.info(
+        f"File counter starts at: {file_counter}  "
+        f"(Drive max: {uploader.max_counter:04d}, "
+        f"Excel max: {tracker.max_counter:04d}, "
+        f"state: {state.get('file_counter', 1)}) "
+        f"-> next tamilpsd-{file_counter:04d}"
+    )
 
     # ── Phase 2: Process pending items ────────────────────────────────────
     processed_this_run = 0
@@ -216,8 +274,7 @@ def main() -> None:
             )
             break
 
-        # ── Item limit — checked BEFORE starting each item ─────────────
-        # If ITEM_LIMIT=1 and processed_this_run=1, we stop here immediately.
+        # ── Item limit ────────────────────────────────────────────────────
         if ITEM_LIMIT > 0 and processed_this_run >= ITEM_LIMIT:
             log.info(
                 f"Item limit ({ITEM_LIMIT}) reached. "
@@ -242,7 +299,6 @@ def main() -> None:
                     else:
                         log.info(f"  Fetching category from: {detail_url}")
                     category = scraper.get_category(detail_url, hint_title=card_title)
-                    # Cache so we never re-fetch on retry
                     for stored_item in state.get("all_items", []):
                         if stored_item.get("download_url") == download_url:
                             stored_item["category"] = category
@@ -276,7 +332,25 @@ def main() -> None:
                 errors_this_run += 1
                 continue
 
-            # ── 2d: Extract and rename with global counter ─────────────────
+            # ── 2d: Extract original filenames from archive ────────────────
+            # We read the archive manifest BEFORE process_archive so we can
+            # map original[i] → renamed[i] for the Excel log.
+            original_names = _list_archive_originals(archive)
+            log.info(f"  Archive contains {len(original_names)} PSD/TIF file(s)")
+
+            # ── 2e: Excel pre-check — skip entire item if ALL files are done
+            if original_names and all(
+                tracker.is_original_done(n) for n in original_names
+            ):
+                log.info(
+                    f"  ⏭  All {len(original_names)} file(s) from this archive "
+                    f"already in Excel log — marking item done, skipping download"
+                )
+                state.mark_processed(download_url)
+                processed_this_run += 1
+                continue
+
+            # ── 2f: Extract and rename with global counter ─────────────────
             result = process_archive(
                 archive_path=archive,
                 work_dir=item_dir / "process",
@@ -289,22 +363,32 @@ def main() -> None:
 
             renamed_files, next_index = result
 
-            # ── 2e: Upload to Drive category subfolder ─────────────────────
+            # ── 2g: Build original→renamed mapping ────────────────────────
+            # process_archive renames in the same order files appear in the archive.
+            # Zip the two lists; if counts differ, fall back to renamed name as key.
+            orig_map: dict[Path, str] = {}
+            for idx, renamed_path in enumerate(renamed_files):
+                orig_name = original_names[idx] if idx < len(original_names) else renamed_path.name
+                orig_map[renamed_path] = orig_name
+
+            # ── 2h: Upload to Drive category subfolder ─────────────────────
             uploaded_count = 0
-            for orig in renamed_files:
-                if orig.exists():
-                    log.info(f"  Uploading: {orig.name}  -> [{category}/]")
+            for renamed_path, orig_name in orig_map.items():
+                if renamed_path.exists():
+                    log.info(f"  Uploading: {renamed_path.name}  -> [{category}/]")
                     upload_result = uploader.upload_to_category(
-                        file_path=orig,
+                        file_path=renamed_path,
                         parent_folder_id=GDRIVE_PSD_FOLDER,
                         category=category,
+                        excel_tracker=tracker,      # ← Excel integration
+                        original_name=orig_name,    # ← original filename logged
                     )
                     if not upload_result.get("skipped"):
                         uploaded_count += 1
                 else:
-                    log.warning(f"  File missing after rename: {orig}")
+                    log.warning(f"  File missing after rename: {renamed_path}")
 
-            # ── 2f: Persist counter and mark item done ─────────────────────
+            # ── 2i: Persist counter and mark item done ─────────────────────
             file_counter = next_index
             state.set("file_counter", file_counter)
             state.mark_processed(download_url)
@@ -314,6 +398,7 @@ def main() -> None:
                 f"Category=[{category}] | "
                 f"Uploaded {uploaded_count} file(s). "
                 f"Next file counter: tamilpsd-{file_counter:04d}. "
+                f"Excel: {tracker.stats()}. "
                 f"State: {state.summary()}"
             )
 
@@ -334,6 +419,7 @@ def main() -> None:
         f"Errors={errors_this_run}, Remaining={remaining}, "
         f"Next file counter=tamilpsd-{file_counter:04d}"
     )
+    log.info(f"📊 Excel tracker final: {tracker.stats()}")
 
     if remaining == 0:
         log.info("All items processed! Touching ALL_DONE to stop automation.")
