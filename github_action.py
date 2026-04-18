@@ -304,6 +304,7 @@ def gdrive_move_to_final(file_id: str, category_folder_id: str) -> bool:
 
 
 
+def scan_gdrive_structure(root_id: str) -> list:
     """
     Walk the PSD GDrive folder. Returns list of:
       (file_id, filename, category_name, category_folder_id)
