@@ -1,0 +1,73 @@
+name: PSD Automation
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # adjust as needed
+  workflow_dispatch:
+
+jobs:
+  automate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+
+    env:
+      FORPSD_COOKIE:          ${{ secrets.FORPSD_COOKIE }}
+      GOOGLE_CLIENT_ID:       ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET:   ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN:   ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+      GDRIVE_PSD_FOLDER:      ${{ secrets.GDRIVE_PSD_FOLDER }}
+      RUN_MINUTES:            ${{ vars.RUN_MINUTES  || '330' }}
+      PAGE_LIMIT:             ${{ vars.PAGE_LIMIT   || '0'   }}
+      ITEM_LIMIT:             ${{ vars.ITEM_LIMIT   || '0'   }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install system tools
+        run: sudo apt-get install -y unrar-free p7zip-full
+
+      - name: Pull latest state
+        run: git pull origin main || true
+
+      - name: Run automation
+        run: python scripts/main.py
+
+      # ─────────────────────────────────────────────────────────────────────
+      # CRITICAL: rename_log.xlsx MUST be committed so the next run can load
+      # it and skip already-uploaded files. Without this, Excel tracker
+      # resets every run and files get re-downloaded and re-uploaded.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Save state to repo
+        run: |
+          git config user.name  "PSD-Bot"
+          git config user.email "psdbot@automation.local"
+          git add state.json automation.log rename_log.xlsx 2>/dev/null || true
+          git diff --cached --quiet || \
+            git commit -m "🤖 Progress: $(date '+%Y-%m-%d %H:%M UTC')"
+          git push origin main || true
+
+      - name: Check completion status
+        run: |
+          if [ -f ALL_DONE ]; then
+            echo "✅ All items processed!"
+          else
+            echo "⏳ Items still pending — next scheduled run will continue."
+          fi
