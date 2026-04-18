@@ -705,12 +705,14 @@
     {
       "download_url": "https://forpsd.com/download/eyJpdiI6IkVFcTA3dUVMSlpFN1BjbUNpdjdrN3c9PSIsInZhbHVlIjoiYlJGYVlxTTZuWGpoZVFKN1Zxa0JpUT09IiwibWFjIjoiOTllOGUxNWFjZTRjZWQ5YjcyZWFjOGEzYzY5MjdmOWZmZmZhMDJmZmExZjM5ZDBkMGNmYzYzOGMwN2QyNGY1MSIsInRhZyI6IiJ9",
       "detail_url": "https://forpsd.com/product_detail/eyJpdiI6IlVDYVdXYTJ5R3Y1dTVVV3R4S0U5K1E9PSIsInZhbHVlIjoib3Z2bUNrdWpvYm9EQ2JZdVFlRkV2dz09IiwibWFjIjoiMzQ1YzdkYzk0OTFlMWY5NWZhYjM3ZTg1NzdkOTY0YzViN2FlM2YwOWUxYmI5NWViZWFiMThhYjYxMDgyZWRlZCIsInRhZyI6IiJ9",
-      "card_title": "Image Preview"
+      "card_title": "Image Preview",
+      "category": "madurai-flex"
     },
     {
       "download_url": "https://forpsd.com/download/eyJpdiI6InFIRGtIOEg5a201VExrSVJGdTNaWWc9PSIsInZhbHVlIjoieTU2T24rQkg0NFJIRU5ucEpIeXBSZz09IiwibWFjIjoiZGZiYmI5MTdjOWQyZTE4Yjc4ZWZmZjJiMGJhNzZmNTUzODIxNTBkZTU5M2YzM2Q1YmNjMjYxZTU2Y2ExYzZlYiIsInRhZyI6IiJ9",
       "detail_url": "https://forpsd.com/product_detail/eyJpdiI6Ik45T2hPT3cvd3VUcnhweFpFUXFVeVE9PSIsInZhbHVlIjoiZWFUMStlQmF3QVJQYnRVSllrN3ROQT09IiwibWFjIjoiZWJiNDU0YTJjYjk3ZDQ3NDViMjI4MWZiZmViZmJkZjU5YWRhOWFjMzdkMzEyZDhhNjFhNzE5OWI1Y2YyZWM4ZSIsInRhZyI6IiJ9",
-      "card_title": "Image Preview"
+      "card_title": "Image Preview",
+      "category": "madurai-flex"
     }
   ],
   "all_urls": [
@@ -951,10 +953,12 @@
     "https://forpsd.com/download/eyJpdiI6ImhDNUdWNGcvWUFhaDZNWmZIWHJ2VlE9PSIsInZhbHVlIjoiKzY5Y3dZTzFtWFUyRFF4UStiOEJlQT09IiwibWFjIjoiZjA1YTBmMjMzOWQ3OTAyYzZlMjViYTNiOTdmNmU0ZjM0ZjcwYWJkZjUxZmVlZGU5M2Q0MTQ0ZTkwNTM4NzViNSIsInRhZyI6IiJ9",
     "https://forpsd.com/download/eyJpdiI6InBMcVd2bWNRNTZhSnE1T1N5WXd4SHc9PSIsInZhbHVlIjoieHhGWE1oZ05PYXp0OW5kUWdEaGhqdz09IiwibWFjIjoiY2E4NmU4NGQ2NzRhYmU5OWEwNWNhOTVjNmY1OTAyOTc1NmQ1ZmE5NTNjMDNhOTdjZjgxNWI5M2I3ZjRiYzA3NyIsInRhZyI6IiJ9",
     "https://forpsd.com/download/eyJpdiI6IjRQOVhFQVBYb3FsU0ZqWHZVWmZuc0E9PSIsInZhbHVlIjoidlhjSFE2STdjc0M5eURPMUphWTVuQT09IiwibWFjIjoiZjZkZjU0ODQ5YzQ0NTcyNjVmMTM2M2Y0YWZhMmY1NjQ2NWY0YmI0ZTY5ZjNiY2FlOThkZDRjMTczY2ZlYmRmYSIsInRhZyI6IiJ9",
-    "https://forpsd.com/download/eyJpdiI6Ii9SVDVQVmdibmFFVHVXaFZycERidlE9PSIsInZhbHVlIjoiNTNGMFNLajUzeThNdTZWQXphNGFhUT09IiwibWFjIjoiZTFhOTg4YjY0MmI4NzhiOGUyZjllMTc0YzdkMmU3Zjc4YmYyZjMyOTgzNmYzZjBmZTJiZmNmZThiYjNhOTNlMiIsInRhZyI6IiJ9"
+    "https://forpsd.com/download/eyJpdiI6Ii9SVDVQVmdibmFFVHVXaFZycERidlE9PSIsInZhbHVlIjoiNTNGMFNLajUzeThNdTZWQXphNGFhUT09IiwibWFjIjoiZTFhOTg4YjY0MmI4NzhiOGUyZjllMTc0YzdkMmU3Zjc4YmYyZjMyOTgzNmYzZjBmZTJiZmNmZThiYjNhOTNlMiIsInRhZyI6IiJ9",
+    "https://forpsd.com/download/eyJpdiI6IkVFcTA3dUVMSlpFN1BjbUNpdjdrN3c9PSIsInZhbHVlIjoiYlJGYVlxTTZuWGpoZVFKN1Zxa0JpUT09IiwibWFjIjoiOTllOGUxNWFjZTRjZWQ5YjcyZWFjOGEzYzY5MjdmOWZmZmZhMDJmZmExZjM5ZDBkMGNmYzYzOGMwN2QyNGY1MSIsInRhZyI6IiJ9",
+    "https://forpsd.com/download/eyJpdiI6InFIRGtIOEg5a201VExrSVJGdTNaWWc9PSIsInZhbHVlIjoieTU2T24rQkg0NFJIRU5ucEpIeXBSZz09IiwibWFjIjoiZGZiYmI5MTdjOWQyZTE4Yjc4ZWZmZjJiMGJhNzZmNTUzODIxNTBkZTU5M2YzM2Q1YmNjMjYxZTU2Y2ExYzZlYiIsInRhZyI6IiJ9"
   ],
-  "file_counter": 118,
-  "total_processed": 117,
-  "last_run": "2026-04-18T07:20:14.057952",
+  "file_counter": 120,
+  "total_processed": 119,
+  "last_run": "2026-04-18T07:34:21.575456",
   "status": "init"
 }
