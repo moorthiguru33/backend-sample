@@ -45,24 +45,10 @@ import shutil
 import sys
 import time
 import zipfile
+import rarfile
+import py7zr
 from datetime import datetime, timedelta
 from pathlib import Path
-
-# Optional archive-format libraries — only needed for RAR / 7Z archives.
-# Install with: pip install rarfile py7zr
-# If missing, those formats are still handled by process_archive itself;
-# the original-name pre-listing step is simply skipped for that format.
-try:
-    import rarfile as _rarfile
-    _HAS_RARFILE = True
-except ImportError:
-    _HAS_RARFILE = False
-
-try:
-    import py7zr as _py7zr
-    _HAS_PY7ZR = True
-except ImportError:
-    _HAS_PY7ZR = False
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -159,8 +145,8 @@ def _list_archive_originals(archive_path: Path) -> list[str]:
     in the order they would be extracted by process_archive.
 
     Used to build the original_name → renamed_name mapping for the Excel log.
-    Supports ZIP (stdlib), RAR (requires rarfile), and 7Z (requires py7zr).
-    Returns [] on any error or if the required library is not installed.
+    Supports ZIP (stdlib), RAR (rarfile), and 7Z (py7zr).
+    Returns [] on any error.
     """
     TARGET_EXT = {".psd", ".tif", ".tiff"}
     names: list[str] = []
@@ -176,20 +162,14 @@ def _list_archive_originals(archive_path: Path) -> list[str]:
                         names.append(p.name)
 
         elif suffix == ".rar":
-            if not _HAS_RARFILE:
-                log.warning("  rarfile not installed — skipping original-name listing for .rar")
-                return []
-            with _rarfile.RarFile(archive_path) as rf:
+            with rarfile.RarFile(archive_path) as rf:
                 for info in rf.infolist():
                     p = Path(info.filename)
                     if p.suffix.lower() in TARGET_EXT and not info.is_dir():
                         names.append(p.name)
 
         elif suffix == ".7z":
-            if not _HAS_PY7ZR:
-                log.warning("  py7zr not installed — skipping original-name listing for .7z")
-                return []
-            with _py7zr.SevenZipFile(archive_path, mode="r") as sz:
+            with py7zr.SevenZipFile(archive_path, mode="r") as sz:
                 for entry in sz.list():
                     p = Path(entry.filename)
                     if p.suffix.lower() in TARGET_EXT and not entry.is_directory:
