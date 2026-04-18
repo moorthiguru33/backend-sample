@@ -1,8 +1,15 @@
-requests==2.31.0
-beautifulsoup4==4.12.3
-gdown==5.2.0
-google-api-python-client==2.127.0
-google-auth==2.29.0
-google-auth-oauthlib==1.2.0
-google-auth-httplib2==0.2.0
-patool==2.3.0
+# ── Google Drive / OAuth2 ─────────────────────────────────────────────────
+google-auth==2.49.2
+google-auth-httplib2==0.3.1
+google-api-python-client==2.194.0
+
+# ── Excel tracking ────────────────────────────────────────────────────────
+openpyxl==3.1.5
+
+# ── Downloading ───────────────────────────────────────────────────────────
+gdown==6.0.0
+requests==2.33.1
+
+# ── Archive formats ───────────────────────────────────────────────────────
+rarfile==4.2
+py7zr==1.1.0
