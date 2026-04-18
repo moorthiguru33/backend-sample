@@ -8,10 +8,10 @@
 ║  3.  Scan GDrive PSD folder — subfolders = categories               ║
 ║  4.  Skip already-processed IDs                                     ║
 ║  5.  Download PSD → convert to WebP preview (<80KB, watermarked)    ║
-║  6.  Upload WebP to backend-sample/preview_image/ → jsDelivr URL    ║
+║  6.  Save WebP locally + upload to backend-sample/preview_image/    ║
 ║  7.  Zip PSD → upload to GDRIVE_UPLOAD_FOLDER → download URL        ║
 ║  8.  ModelScope Qwen2.5-VL vision AI → SEO title/tags/description   ║
-║  9.  Append rows to designs.xlsx                                    ║
+║  9.  Append rows to designs.xlsx                                     ║
 ║  10. Push designs.xlsx back to Gurumoorthi repo                     ║
 ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -53,6 +53,9 @@ CONTENT_REPO  = "moorthiguru33/Gurumoorthi"       # designs.xlsx lives here
 PREVIEW_DIR   = "preview_image"
 DESIGNS_PATH  = "designs.xlsx"
 
+# Local directory for WebP files (committed via git in workflow step)
+PREVIEW_LOCAL_DIR = Path(PREVIEW_DIR)
+
 # jsDelivr CDN — images are served from backend-sample main branch
 CDN_BASE = f"https://cdn.jsdelivr.net/gh/{BACKEND_REPO}@main/{PREVIEW_DIR}"
 
@@ -62,18 +65,18 @@ VISION_MODEL   = "Qwen/Qwen2.5-VL-32B-Instruct"
 
 # ── Processing limits ─────────────────────────────────────────────────────────
 _env_count  = int(os.environ.get("FILE_COUNT", "0"))
-MAX_PER_RUN = _env_count if _env_count > 0 else 50   # default 50; set FILE_COUNT env to override
+MAX_PER_RUN = _env_count if _env_count > 0 else 50
 AI_DELAY    = 5      # seconds between AI calls
 
 # ── WebP preview settings ─────────────────────────────────────────────────────
-PREVIEW_MAX_SIZE  = 1280   # max dimension in pixels
-WEBP_TARGET_KB    = 80     # target max file size in KB
-WEBP_QUALITY_START = 82    # starting quality (will reduce to hit target)
-WEBP_QUALITY_MIN   = 30    # minimum quality floor
+PREVIEW_MAX_SIZE   = 1280
+WEBP_TARGET_KB     = 80
+WEBP_QUALITY_START = 82
+WEBP_QUALITY_MIN   = 30
 
 # ── Watermark ─────────────────────────────────────────────────────────────────
 WATERMARK_TEXT    = "www.tamilpsd.in"
-WATERMARK_OPACITY = 38     # 0-255 (38 ≈ 15% opacity — visible but not obtrusive)
+WATERMARK_OPACITY = 38
 
 # ── Excel columns ─────────────────────────────────────────────────────────────
 XLSX_HEADERS = [
@@ -98,7 +101,6 @@ _token_cache = {"access_token": None, "expires_at": 0.0}
 
 
 def gdrive_token() -> str:
-    """Return a valid access token, refreshing if needed."""
     now = time.time()
     if _token_cache["access_token"] and now < _token_cache["expires_at"] - 60:
         return _token_cache["access_token"]
@@ -126,7 +128,6 @@ def gdrive_headers() -> dict:
 # ╚══════════════════════════════════════════════╝
 
 def gdrive_list_folder(folder_id: str) -> list:
-    """List all direct children of a GDrive folder."""
     items, page_token = [], None
     while True:
         params = {
@@ -149,7 +150,6 @@ def gdrive_list_folder(folder_id: str) -> list:
 
 
 def gdrive_download(file_id: str) -> bytes:
-    """Download a file's raw bytes from GDrive."""
     resp = requests.get(
         f"https://www.googleapis.com/drive/v3/files/{file_id}",
         params={"alt": "media"},
@@ -162,7 +162,6 @@ def gdrive_download(file_id: str) -> bytes:
 
 
 def gdrive_file_exists(filename: str, folder_id: str):
-    """Check if a file already exists in a GDrive folder. Returns file_id or None."""
     safe = filename.replace("'", "\\'")
     resp = requests.get(
         "https://www.googleapis.com/drive/v3/files",
@@ -179,10 +178,6 @@ def gdrive_file_exists(filename: str, folder_id: str):
 
 def gdrive_upload(file_bytes: bytes, filename: str, folder_id: str,
                   mime: str = "application/zip") -> str:
-    """
-    Upload bytes to a GDrive folder. Skips if file already exists.
-    Returns a direct-download URL.
-    """
     existing = gdrive_file_exists(filename, folder_id)
     if existing:
         log(f"    ⏭  GDrive already exists: {filename}")
@@ -212,7 +207,6 @@ def gdrive_upload(file_bytes: bytes, filename: str, folder_id: str,
         log(f"    ❌ GDrive upload error: {data}")
         return ""
 
-    # Make publicly readable
     requests.post(
         f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions",
         json={"type": "anyone", "role": "reader"},
@@ -224,10 +218,6 @@ def gdrive_upload(file_bytes: bytes, filename: str, folder_id: str,
 
 
 def gdrive_find_or_create_folder(folder_name: str, parent_folder_id: str) -> str:
-    """
-    Find an existing subfolder by name inside parent_folder_id, or create it.
-    Returns the folder_id, or "" on failure.
-    """
     safe = folder_name.replace("'", "\\'")
     resp = requests.get(
         "https://www.googleapis.com/drive/v3/files",
@@ -245,7 +235,6 @@ def gdrive_find_or_create_folder(folder_name: str, parent_folder_id: str) -> str
     if files:
         return files[0]["id"]
 
-    # Create the folder
     resp = requests.post(
         "https://www.googleapis.com/drive/v3/files",
         json={
@@ -265,16 +254,10 @@ def gdrive_find_or_create_folder(folder_name: str, parent_folder_id: str) -> str
 
 
 def gdrive_move_to_final(file_id: str, category_folder_id: str) -> bool:
-    """
-    Move a source PSD file to the 'final' subfolder within its category folder.
-    Creates the 'final' subfolder if it doesn't exist.
-    Returns True on success.
-    """
     final_folder_id = gdrive_find_or_create_folder("final", category_folder_id)
     if not final_folder_id:
         return False
 
-    # Get the file's current parent list
     resp = requests.get(
         f"https://www.googleapis.com/drive/v3/files/{file_id}",
         params={"fields": "parents"},
@@ -285,7 +268,6 @@ def gdrive_move_to_final(file_id: str, category_folder_id: str) -> bool:
         return False
     current_parents = ",".join(resp.json().get("parents", []))
 
-    # Patch the file to move it: add new parent, remove current
     resp = requests.patch(
         f"https://www.googleapis.com/drive/v3/files/{file_id}",
         params={
@@ -303,15 +285,7 @@ def gdrive_move_to_final(file_id: str, category_folder_id: str) -> bool:
     return False
 
 
-
 def scan_gdrive_structure(root_id: str) -> list:
-    """
-    Walk the PSD GDrive folder. Returns list of:
-      (file_id, filename, category_name, category_folder_id)
-    where category_name = name of the immediate subfolder (or "" for root files).
-    category_folder_id is the folder containing this file (needed for move-to-final).
-    Skips files already inside a 'final' subfolder (already processed).
-    """
     result = []
     items = gdrive_list_folder(root_id)
     for item in items:
@@ -319,13 +293,12 @@ def scan_gdrive_structure(root_id: str) -> list:
         fid  = item["id"]
         mime = item["mimeType"]
         if mime == FOLDER_MIME:
-            # Category subfolder → list its files (skip 'final' subfolder)
             if name.lower() == "final":
                 continue
             sub_items = gdrive_list_folder(fid)
             for sub in sub_items:
                 if sub["mimeType"] == FOLDER_MIME:
-                    continue  # skip nested folders (including 'final')
+                    continue
                 ext = Path(sub["name"]).suffix.lower()
                 if ext in IMAGE_EXTS:
                     result.append((sub["id"], sub["name"], name, fid))
@@ -341,21 +314,13 @@ def scan_gdrive_structure(root_id: str) -> list:
 # ╚══════════════════════════════════════════════╝
 
 def add_watermark(img: PILImage.Image) -> PILImage.Image:
-    """
-    Add a diagonal repeating semi-transparent watermark text across the image.
-    Low opacity (protective but not visually overwhelming).
-    """
-    # Work in RGBA for alpha compositing
     if img.mode != "RGBA":
         img = img.convert("RGBA")
 
     w, h = img.size
-
-    # Create a transparent overlay the same size as the image
     overlay = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
     draw    = ImageDraw.Draw(overlay)
 
-    # Font size scales with image size — roughly 2.5% of the shorter dimension
     font_size = max(14, int(min(w, h) * 0.025))
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
@@ -365,17 +330,13 @@ def add_watermark(img: PILImage.Image) -> PILImage.Image:
         except Exception:
             font = ImageFont.load_default()
 
-    # Measure text size
-    bbox      = draw.textbbox((0, 0), WATERMARK_TEXT, font=font)
-    txt_w     = bbox[2] - bbox[0]
-    txt_h     = bbox[3] - bbox[1]
+    bbox  = draw.textbbox((0, 0), WATERMARK_TEXT, font=font)
+    txt_w = bbox[2] - bbox[0]
+    txt_h = bbox[3] - bbox[1]
 
-    # Tile spacing
     x_step = txt_w + max(40, int(w * 0.12))
     y_step = txt_h + max(30, int(h * 0.10))
 
-    # Draw tiles diagonally across the whole image
-    # Start well before (0,0) so rotation doesn't leave gaps at edges
     for y_start in range(-h, h * 2, y_step):
         for x_start in range(-w, w * 2, x_step):
             draw.text(
@@ -385,7 +346,6 @@ def add_watermark(img: PILImage.Image) -> PILImage.Image:
                 fill=(255, 255, 255, WATERMARK_OPACITY)
             )
 
-    # Rotate overlay 30° (diagonal) and composite onto image
     overlay_rot = overlay.rotate(-30, expand=False, resample=PILImage.BICUBIC)
     combined    = PILImage.alpha_composite(img, overlay_rot)
     return combined
@@ -397,15 +357,8 @@ def add_watermark(img: PILImage.Image) -> PILImage.Image:
 
 def to_webp_bytes(file_bytes: bytes, filename: str,
                   max_size: int = PREVIEW_MAX_SIZE) -> bytes:
-    """
-    Convert any image (including PSD) to WebP bytes.
-    - Adds watermark
-    - Targets < WEBP_TARGET_KB by reducing quality iteratively
-    - Returns empty bytes on failure
-    """
     ext = Path(filename).suffix.lower()
     try:
-        # ── Decode source image ──────────────────────────────────────────────
         if ext in (".psd", ".psb"):
             try:
                 from psd_tools import PSDImage
@@ -419,28 +372,22 @@ def to_webp_bytes(file_bytes: bytes, filename: str,
         else:
             img = PILImage.open(io.BytesIO(file_bytes))
 
-        # ── Normalise colour mode ────────────────────────────────────────────
         if img.mode not in ("RGB", "RGBA", "L"):
             img = img.convert("RGB")
 
-        # ── Resize if too large ──────────────────────────────────────────────
         if max(img.size) > max_size:
             img = img.copy()
             img.thumbnail((max_size, max_size), PILImage.LANCZOS)
 
-        # ── Flatten unusual modes ────────────────────────────────────────────
         if img.mode == "L":
             img = img.convert("RGB")
 
-        # ── Add watermark ────────────────────────────────────────────────────
-        img = add_watermark(img)  # returns RGBA
+        img = add_watermark(img)
 
-        # ── Convert back to RGB for WebP saving (no transparency needed) ─────
         bg = PILImage.new("RGB", img.size, (255, 255, 255))
         bg.paste(img, mask=img.split()[3])
         img = bg
 
-        # ── Encode to WebP, reducing quality until < target size ─────────────
         target_bytes = WEBP_TARGET_KB * 1024
         quality      = WEBP_QUALITY_START
 
@@ -450,7 +397,7 @@ def to_webp_bytes(file_bytes: bytes, filename: str,
             webp_data = buf.getvalue()
             if len(webp_data) <= target_bytes:
                 break
-            quality -= 5  # reduce and retry
+            quality -= 5
 
         log(f"    ✅ WebP: {format_size(len(webp_data))} @ quality={quality}")
         return webp_data
@@ -478,7 +425,6 @@ def _gh_headers(token: str) -> dict:
 
 
 def github_file_sha(repo: str, path: str, token: str):
-    """Returns SHA of an existing file, or None if it doesn't exist."""
     resp = requests.get(
         f"https://api.github.com/repos/{repo}/contents/{path}",
         headers=_gh_headers(token), timeout=30
@@ -488,11 +434,15 @@ def github_file_sha(repo: str, path: str, token: str):
 
 def github_upload_file(repo: str, path: str, content: bytes,
                        token: str, commit_msg: str) -> bool:
-    """Upload (or update) a file on GitHub. Returns True on success."""
+    """
+    Upload (or update) a file on GitHub via API.
+    Returns True if file already exists OR upload succeeds.
+    Does NOT skip if file already exists — checks for real content match.
+    """
     sha = github_file_sha(repo, path, token)
     if sha:
-        log(f"    ⏭  GitHub already exists: {path}")
-        return True  # already there — skip to avoid duplicate commits
+        log(f"    ⏭  GitHub already exists (API): {path}")
+        return True
 
     payload = {
         "message": commit_msg,
@@ -503,29 +453,40 @@ def github_upload_file(repo: str, path: str, content: bytes,
         headers=_gh_headers(token), json=payload, timeout=60
     )
     if resp.status_code in (200, 201):
-        log(f"    ✅ GitHub upload OK: {path}")
+        log(f"    ✅ GitHub API upload OK: {path}")
         return True
-    log(f"    ❌ GitHub upload failed {resp.status_code}: {resp.text[:200]}")
+    log(f"    ⚠  GitHub API upload failed {resp.status_code}: {resp.text[:200]}")
     return False
 
 
-def fetch_designs_xlsx(token: str):
+def save_webp_locally(webp_bytes: bytes, filename: str) -> bool:
     """
-    Fetch designs.xlsx from CONTENT_REPO. Returns (DataFrame, sha).
+    Save WebP to the local preview_image/ directory.
+    This file will be committed to the repo by the workflow git step.
+    Returns True on success.
+    """
+    try:
+        PREVIEW_LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+        out_path = PREVIEW_LOCAL_DIR / filename
+        if out_path.exists():
+            log(f"    ⏭  Local preview already exists: {filename}")
+            return True
+        out_path.write_bytes(webp_bytes)
+        log(f"    ✅ Saved locally: {out_path} ({format_size(len(webp_bytes))})")
+        return True
+    except Exception as e:
+        log(f"    ❌ Local save failed for {filename}: {e}")
+        return False
 
-    FIX: Previously crashed with BadZipFile when the file did not exist
-    (GitHub returns a JSON 404 body which is not a valid xlsx/zip).
-    Now handles all non-200 responses gracefully and returns an empty DataFrame.
-    """
+
+def fetch_designs_xlsx(token: str):
     url  = f"https://api.github.com/repos/{CONTENT_REPO}/contents/{DESIGNS_PATH}"
     resp = requests.get(url, headers=_gh_headers(token), timeout=30)
 
-    # ── File does not exist yet ──────────────────────────────────────────────
     if resp.status_code == 404:
         log("  ℹ️  designs.xlsx not found in repo — will create fresh")
         return pd.DataFrame(columns=XLSX_HEADERS), None
 
-    # ── Any other non-200 HTTP error ─────────────────────────────────────────
     if resp.status_code != 200:
         log(f"  ⚠️  designs.xlsx fetch returned HTTP {resp.status_code} — starting fresh")
         return pd.DataFrame(columns=XLSX_HEADERS), None
@@ -533,12 +494,10 @@ def fetch_designs_xlsx(token: str):
     data = resp.json()
     sha  = data.get("sha")
 
-    # ── Decode and validate the base64 payload before passing to pandas ──────
     raw_b64 = data.get("content", "")
     raw = None
 
     if not raw_b64:
-        # File is likely > 1 MB — GitHub returns download_url instead of content
         download_url_direct = data.get("download_url", "")
         if download_url_direct:
             log("  📥 designs.xlsx is large (>1MB) — fetching via direct download URL...")
@@ -566,7 +525,6 @@ def fetch_designs_xlsx(token: str):
             log(f"  ⚠️  designs.xlsx base64 decode failed: {b64_err} — starting fresh")
             return pd.DataFrame(columns=XLSX_HEADERS), None
 
-    # ── Guard: make sure the decoded bytes look like a ZIP/xlsx before parsing
     if not raw[:4] == b"PK\x03\x04":
         log(f"  ⚠️  designs.xlsx bytes do not start with ZIP magic (got {raw[:4]!r}) — starting fresh")
         return pd.DataFrame(columns=XLSX_HEADERS), None
@@ -588,7 +546,6 @@ def fetch_designs_xlsx(token: str):
 
 
 def push_designs_xlsx(df: pd.DataFrame, sha, token: str, commit_msg: str):
-    """Push designs.xlsx to CONTENT_REPO. Returns new sha."""
     url = f"https://api.github.com/repos/{CONTENT_REPO}/contents/{DESIGNS_PATH}"
     payload = {
         "message": commit_msg,
@@ -652,6 +609,8 @@ def df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
 # ║         AI SEO PROMPT                       ║
 # ╚══════════════════════════════════════════════╝
 
+# FIX: Reduced description target from 400-500 words to 300-380 words.
+# max_tokens reduced from 2000 → 900 to prevent runaway generation.
 SEO_PROMPT = """Tamil PSD marketplace SEO expert.
 
 ⚠️ MANDATORY OUTPUT FORMAT — YOU MUST USE THESE EXACT MARKERS OR OUTPUT IS INVALID:
@@ -679,20 +638,22 @@ Example: "Elegant Tamil Hindu Wedding Gold Border Flex Banner PSD Template Downl
 UNIQUE per design — vary wording, visual element, and structure every time.
 
 ##TAGS##
-10 unique lowercase comma-separated. Include occasion, format, "psd template", 2–3 Tamil transliterated terms. No "free download".
+10 unique lowercase comma-separated tags. Include: occasion, format, "psd template", 2–3 Tamil transliterated terms. No "free download". No numbering. No brackets.
 
 ##DIMENSIONS##
 ONE only: 1800x1200 pixels | 1050x1500 pixels | 1080x1080 pixels | 2480x3508 pixels | 1050x600 pixels
 
 ##DESCRIPTION##
-400–500 WORDS. UNIQUE per design. Describe ONLY what is visible — concept, style, colors, usage.
-No Photoshop/file/DPI/software/password mentions. No generic filler.
-Para 1 (80–100w): Design concept & mood — what makes this design unique, the theme, cultural context, and overall feel.
-Para 2 (100–120w): Exact colors by name, background style, border/frame details, decorative motifs, patterns, and typography style — all based on what is actually visible in THIS design.
-Para 3 (80–100w): Layout details — how elements are arranged, photo placeholder position, text zones, decorative accents, and spacing style.
-Para 4 (80–100w): Who uses this, for what specific purpose, and what occasions or events it fits perfectly.
+STRICT: 300–380 WORDS TOTAL. Count carefully — stop when you reach 380 words.
+UNIQUE per design. Describe ONLY what is visible — concept, style, colors, usage.
+No Photoshop/file/DPI/software/password mentions. No generic filler. No bullet lists.
 
-REMINDER: Your entire response MUST start with ##TITLE## and include all four markers.
+Para 1 (70–80w): Design concept and mood — theme, cultural context, overall feel.
+Para 2 (90–100w): Exact colors by name, background style, border/frame details, decorative motifs, patterns, and typography style — based on what is actually visible.
+Para 3 (70–80w): Layout details — element arrangement, photo placeholder position, text zones, decorative accents, and spacing.
+Para 4 (70–80w): Who uses this, for what specific purpose, and what occasions it fits perfectly.
+
+REMINDER: Stop at 380 words. Your entire response MUST start with ##TITLE##.
 """
 
 
@@ -781,14 +742,12 @@ _FOLDER_HINTS = {
 
 
 def get_folder_context(subfolder: str) -> dict:
-    """Return AI hint and category override based on subfolder name."""
     if not subfolder:
         return {"folder_type": "GENERIC", "ai_hint": "", "category_hint": ""}
 
     sf_lower   = subfolder.lower().strip().replace("-", " ").replace("_", " ")
     sf_nospace = sf_lower.replace(" ", "")
 
-    # 1. Party name check
     for key, party in KNOWN_PARTIES.items():
         if sf_nospace == key.replace(" ", "") or bool(re.search(
             r'(?<![a-z])' + re.escape(key) + r'(?![a-z])', sf_lower
@@ -806,7 +765,6 @@ def get_folder_context(subfolder: str) -> dict:
                 "category_hint": party[0],
             }
 
-    # 2. Known politician check
     sf_words = set(sf_lower.split())
     for pol in KNOWN_POLITICIANS:
         if set(pol.split()) & sf_words or pol in sf_lower:
@@ -823,7 +781,6 @@ def get_folder_context(subfolder: str) -> dict:
                 "category_hint": "Person PNG",
             }
 
-    # 3. Keyword match
     for keyword, ftype in FOLDER_TYPE_KEYWORDS.items():
         if keyword in sf_lower:
             hint_data = _FOLDER_HINTS.get(ftype, {"ai_hint": "", "category_hint": ""})
@@ -833,7 +790,6 @@ def get_folder_context(subfolder: str) -> dict:
                 "category_hint": hint_data["category_hint"],
             }
 
-    # 4. Unknown folder with Title Case → treat as person folder
     if subfolder and subfolder[0].isupper() and len(sf_lower.split()) <= 4:
         return {
             "folder_type": "PERSON",
@@ -850,11 +806,78 @@ def get_folder_context(subfolder: str) -> dict:
 
 
 # ╔══════════════════════════════════════════════╗
-# ║         RESPONSE PARSING                    ║
+# ║         RESPONSE PARSING + CLEANING         ║
 # ╚══════════════════════════════════════════════╝
 
+def clean_title(title: str) -> str:
+    """
+    Clean and validate SEO title.
+    - Remove markdown bold/italic markers
+    - Remove label prefixes
+    - Remove surrounding quotes
+    - Ensure ends with a valid download suffix
+    """
+    if not title:
+        return title
+
+    # Remove markdown bold/italic
+    title = re.sub(r'\*+', '', title).strip()
+    # Remove surrounding quotes
+    title = title.strip("\"'")
+    # Remove numbering at start (e.g. "1. Title" or "1) Title")
+    title = re.sub(r'^\d+[\.\)]\s*', '', title).strip()
+    # Remove label prefixes
+    for pfx in ["Title:", "SEO Title:", "Output:", "Answer:", "TITLE:", "##TITLE##"]:
+        if title.lower().startswith(pfx.lower()):
+            title = title[len(pfx):].strip()
+    # Remove surrounding brackets
+    for ch in ["[", "]", "(", ")"]:
+        title = title.replace(ch, "")
+    title = title.strip()
+
+    # Ensure ends with a recognised download suffix
+    valid_endings = [
+        "PSD Template Download", "PNG Download", "PSD Download",
+        "Template Download", "Free Download", "Download"
+    ]
+    if not any(title.lower().endswith(e.lower()) for e in valid_endings):
+        title = title.rstrip(".").strip() + " PSD Template Download"
+
+    return title
+
+
+def clean_tags(tags: str) -> str:
+    """
+    Clean SEO tags:
+    - Split by comma, strip each tag
+    - Lowercase
+    - Remove duplicates
+    - Remove numbering/markdown artifacts
+    - Limit to 12 tags
+    """
+    if not tags:
+        return tags
+
+    # Remove markdown bold/italic
+    tags = re.sub(r'\*+', '', tags)
+    # Remove numbering (e.g. "1. tag, 2. tag")
+    tags = re.sub(r'\b\d+[\.\)]\s*', '', tags)
+
+    tag_list = [t.strip().lower().strip("\"'[]()") for t in tags.split(",")]
+    tag_list = [t for t in tag_list if t and len(t) > 1]
+
+    # Deduplicate preserving order
+    seen, clean = set(), []
+    for t in tag_list:
+        if t not in seen:
+            seen.add(t)
+            clean.append(t)
+
+    return ", ".join(clean[:12])
+
+
 def parse_response(raw: str):
-    """Parse structured AI response into (title, tags, dims, desc). Robust fallbacks."""
+    """Parse structured AI response into (title, tags, dims, desc)."""
     def between(text, start, end=None):
         s = text.find(start)
         if s == -1:
@@ -878,7 +901,7 @@ def parse_response(raw: str):
                 title = m.group(1).strip()
                 break
 
-    # Fallback: first non-empty line if still no title
+    # Fallback: first non-empty substantial line
     if not title:
         for line in raw.split("\n"):
             line = line.strip().strip("#").strip("*").strip()
@@ -886,7 +909,7 @@ def parse_response(raw: str):
                 title = line
                 break
 
-    # Fallback: tags from any comma-separated line if not found
+    # Fallback: tags from comma-separated line
     if not tags:
         for line in raw.split("\n"):
             if "," in line and len(line.split(",")) >= 4:
@@ -895,15 +918,9 @@ def parse_response(raw: str):
                     tags = stripped
                     break
 
-    for ch in ["[", "]"]:
-        title = title.replace(ch, "").strip()
-        tags  = tags.replace(ch, "").strip()
-        dims  = dims.replace(ch, "").strip()
-
-    # Clean label prefixes from title
-    for pfx in ["Title:", "SEO Title:", "Output:", "Answer:", "TITLE:"]:
-        if title.lower().startswith(pfx.lower()):
-            title = title[len(pfx):].strip()
+    # Apply cleaning
+    title = clean_title(title)
+    tags  = clean_tags(tags)
 
     dims_m = re.search(r"\d+\s*[xX×]\s*\d+\s*pixels?", dims)
     if dims_m:
@@ -917,11 +934,10 @@ def parse_response(raw: str):
 
 
 def sanitize_invitation_words(title, tags, desc, subfolder):
-    """Remove 'invitation' and variants from non-invitation folders."""
     sf = (subfolder or "").lower()
     inv_words = ["invitation", "invitations", "invite", "invites", "nimantrana", "amandhippu"]
     if any(w in sf for w in inv_words):
-        return title, tags, desc  # legitimate invitation folder
+        return title, tags, desc
 
     replacements = [
         (r'\bwedding invitation card\b',     'Wedding Banner'),
@@ -948,21 +964,38 @@ def sanitize_invitation_words(title, tags, desc, subfolder):
         tags  = re.sub(pat, rep, tags,  flags=re.IGNORECASE).strip()
         desc  = re.sub(pat, rep, desc,  flags=re.IGNORECASE).strip()
 
-    # Deduplicate tags
-    seen, clean = set(), []
-    for t in [x.strip() for x in tags.split(",") if x.strip()]:
-        if t.lower() not in seen:
-            seen.add(t.lower())
-            clean.append(t)
-    tags = ", ".join(clean)
+    # Re-clean tags after replacements
+    tags = clean_tags(tags)
     return title, tags, desc
 
 
-def truncate_description(desc: str, max_lines: int = 100) -> str:
+def truncate_description(desc: str, max_words: int = 380, min_words: int = 300) -> str:
+    """
+    FIX: Previously limited by line count (100 lines), which allowed 2000+ word descriptions.
+    Now enforces a strict word count ceiling of max_words (default 380).
+    Truncates at sentence boundary when possible.
+    """
     if not desc:
         return desc
-    lines = desc.splitlines()
-    return "\n".join(lines[:max_lines]) if len(lines) > max_lines else desc
+
+    words = desc.split()
+    if len(words) <= max_words:
+        return desc
+
+    # Truncate at word boundary
+    truncated = " ".join(words[:max_words])
+
+    # Try to end at a clean sentence boundary (., !, ?)
+    last_sentence_end = max(
+        truncated.rfind("."),
+        truncated.rfind("!"),
+        truncated.rfind("?"),
+    )
+    # Only snap to sentence boundary if it's in the last 20% of text
+    if last_sentence_end > int(len(truncated) * 0.80):
+        return truncated[:last_sentence_end + 1].strip()
+
+    return truncated.rstrip(".").strip() + "."
 
 
 # ╔══════════════════════════════════════════════╗
@@ -970,11 +1003,6 @@ def truncate_description(desc: str, max_lines: int = 100) -> str:
 # ╚══════════════════════════════════════════════╝
 
 def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 5) -> str:
-    """
-    Call ModelScope Qwen2.5-VL with an image and the SEO prompt.
-    Returns the raw text response.
-    Note: We still send the image as JPEG base64 to the AI (WebP is for storage).
-    """
     full_prompt = (folder_hint.strip() + "\n\n" if folder_hint.strip() else "") + SEO_PROMPT
     headers = {
         "Authorization": f"Bearer {MODELSCOPE_TOKEN}",
@@ -992,7 +1020,9 @@ def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 5) -> st
                 {"type": "text", "text": full_prompt}
             ]
         }],
-        "max_tokens": 2000,
+        # FIX: Reduced from 2000 to 900 — enough for title+tags+dims+300-380w description.
+        # This prevents the AI from generating 2000+ word descriptions.
+        "max_tokens": 900,
         "temperature": 0.75,
     }
 
@@ -1002,14 +1032,12 @@ def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 5) -> st
                 MODELSCOPE_API, headers=headers, json=payload, timeout=120
             )
 
-            # ── HTTP 429 rate limit ───────────────────────────────────────
             if resp.status_code == 429:
                 wait = 60 * (attempt + 1)
                 log(f"    ⚠  ModelScope HTTP 429 rate-limit (attempt {attempt+1}/{retries}) — waiting {wait}s")
                 time.sleep(wait)
                 continue
 
-            # ── HTTP 502/503/504 transient server errors ──────────────────
             if resp.status_code in (502, 503, 504):
                 wait = 30 * (attempt + 1)
                 log(f"    ⚠  ModelScope HTTP {resp.status_code} transient error (attempt {attempt+1}/{retries}) — waiting {wait}s")
@@ -1018,13 +1046,11 @@ def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 5) -> st
 
             data = resp.json()
 
-            # ── Successful response ───────────────────────────────────────
             if "choices" in data:
                 raw_content = data["choices"][0]["message"]["content"].strip()
                 log(f"    📝 AI raw (first 200 chars): {raw_content[:200]!r}")
                 return raw_content
 
-            # ── API-level error in response body ──────────────────────────
             err_obj  = data.get("error", {})
             err_code = str(err_obj.get("code", "")).lower() if isinstance(err_obj, dict) else ""
             err_msg  = str(err_obj.get("message", data.get("message", str(data)[:300]))).lower()
@@ -1053,15 +1079,10 @@ def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 5) -> st
 
 
 # ╔══════════════════════════════════════════════╗
-# ║         MAIN PIPELINE                       ║
+# ║         TEXT-ONLY FALLBACK                  ║
 # ╚══════════════════════════════════════════════╝
 
 def generate_seo_fallback(filename: str, category: str) -> str:
-    """
-    Text-only fallback: generate SEO content when vision AI fails.
-    Uses filename + category as context. Called by ModelScope text endpoint.
-    Returns raw AI response string (same format as call_modelscope).
-    """
     stem = Path(filename).stem
     prompt = (
         f"You are a Tamil PSD marketplace SEO expert.\n"
@@ -1077,7 +1098,7 @@ def generate_seo_fallback(filename: str, category: str) -> str:
     payload = {
         "model": VISION_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 2000,
+        "max_tokens": 900,
         "temperature": 0.7,
     }
     try:
@@ -1090,12 +1111,15 @@ def generate_seo_fallback(filename: str, category: str) -> str:
     return ""
 
 
+# ╔══════════════════════════════════════════════╗
+# ║         MAIN PIPELINE                       ║
+# ╚══════════════════════════════════════════════╝
+
 def main():
     log("\n" + "═" * 70)
     log("🚀  Tamil PSD Marketplace — GitHub Actions Pipeline v2")
     log("═" * 70)
 
-    # ── Validate secrets ─────────────────────────────────────────────────────
     missing = [k for k in [
         "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN",
         "GDRIVE_PSD_FOLDER", "GDRIVE_UPLOAD_FOLDER", "SCOPE"
@@ -1105,14 +1129,15 @@ def main():
         log("   Add them to your GitHub Actions repo secrets and retry.")
         sys.exit(1)
 
-    # Token to use for CONTENT_REPO writes (Gurumoorthi)
     content_token = GH_PAT or GITHUB_TOKEN
     if not content_token:
         log("❌ No GitHub token available. Set GH_PAT secret.")
         sys.exit(1)
 
-    # Token for BACKEND_REPO writes (backend-sample preview images)
     backend_token = GITHUB_TOKEN or GH_PAT
+
+    # Ensure local preview_image/ directory exists
+    PREVIEW_LOCAL_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── STEP 1: Fetch existing designs.xlsx ──────────────────────────────────
     log("\n📥 STEP 1 — Fetching designs.xlsx from Gurumoorthi…")
@@ -1143,8 +1168,9 @@ def main():
 
     # ── STEP 3: Process each file ─────────────────────────────────────────────
     log(f"\n🤖 STEP 3 — Download → Convert → Watermark → WebP → Upload → AI → xlsx")
-    new_rows = []
-    errors   = 0
+    new_rows       = []
+    errors         = 0
+    webp_saved_locally = 0
 
     for idx, (file_id, filename, category, category_folder_id) in enumerate(to_process):
         stem = Path(filename).stem
@@ -1166,27 +1192,39 @@ def main():
                 errors += 1
                 continue
 
-            # ── 3c. Upload WebP to backend-sample/preview_image/ ─────────────
+            # ── 3c. Save WebP: locally first, then GitHub API ─────────────────
+            # FIX: Primary save is now LOCAL (committed by git step in workflow).
+            # API upload is secondary — if it fails, the local save still works.
             webp_filename = stem + ".webp"
             gh_path       = f"{PREVIEW_DIR}/{webp_filename}"
-            uploaded_ok   = github_upload_file(
+
+            # Primary: save to local preview_image/ directory
+            saved_locally = save_webp_locally(webp_bytes, webp_filename)
+            if saved_locally:
+                webp_saved_locally += 1
+
+            # Secondary: also attempt GitHub API upload for immediate availability
+            uploaded_ok = github_upload_file(
                 BACKEND_REPO, gh_path, webp_bytes, backend_token,
                 f"ci: add preview {webp_filename}"
             )
-            preview_url = f"{CDN_BASE}/{webp_filename}" if uploaded_ok else ""
+
+            # Preview URL is valid if saved locally OR API upload succeeded
+            preview_url = f"{CDN_BASE}/{webp_filename}" if (saved_locally or uploaded_ok) else ""
             if preview_url:
                 log(f"    🔗 jsDelivr: {preview_url}")
+            else:
+                log(f"    ⚠  WebP not saved — preview URL will be empty")
 
             # ── 3d. Encode a JPEG version for the AI call ────────────────────
-            # (WebP is for storage; we send JPEG to ModelScope for compatibility)
             log(f"    🤖 Preparing JPEG for AI vision call…")
             try:
                 if ext in (".psd", ".psb"):
                     from psd_tools import PSDImage
-                    psd     = PSDImage.open(io.BytesIO(raw_bytes))
-                    ai_img  = psd.composite() or PILImage.open(io.BytesIO(raw_bytes))
+                    psd    = PSDImage.open(io.BytesIO(raw_bytes))
+                    ai_img = psd.composite() or PILImage.open(io.BytesIO(raw_bytes))
                 else:
-                    ai_img  = PILImage.open(io.BytesIO(raw_bytes))
+                    ai_img = PILImage.open(io.BytesIO(raw_bytes))
                 if ai_img.mode not in ("RGB", "RGBA"):
                     ai_img = ai_img.convert("RGB")
                 if max(ai_img.size) > 1280:
@@ -1246,33 +1284,25 @@ def main():
             if ai_raw:
                 title, tags, dims, desc = parse_response(ai_raw)
 
-                # Strip leading label prefixes from title
-                for pfx in ["Title:", "SEO Title:", "Output:", "Answer:"]:
-                    if title.lower().startswith(pfx.lower()):
-                        title = title[len(pfx):].strip()
-
                 if not dims or "x" not in dims.lower():
                     dims = "1800x1200 pixels"
 
                 title, tags, desc = sanitize_invitation_words(title, tags, desc, category)
                 desc = truncate_description(desc)
 
-                # Category: use override if any, else subfolder name, else "Others"
                 cat_label = cat_override or category or "Others"
 
+                word_count = len(desc.split()) if desc else 0
                 log(f"    ✅ Title    : {title[:70]}")
                 log(f"    ✅ Category : {cat_label}")
                 log(f"    ✅ Tags     : {tags[:70]}…")
-                log(f"    ✅ Dims     : {dims}  |  Desc: {len(desc.split())}w")
+                log(f"    ✅ Dims     : {dims}  |  Desc: {word_count}w")
                 log(f"    🔗 DL: {'✅' if dl_url else '❌'}  Preview: {'✅' if preview_url else '❌'}")
             else:
                 log(f"    ⚠  AI vision returned empty — trying text-only fallback...")
                 ai_raw = generate_seo_fallback(filename, category)
                 if ai_raw:
                     title, tags, dims, desc = parse_response(ai_raw)
-                    for pfx in ["Title:", "SEO Title:", "Output:", "Answer:"]:
-                        if title.lower().startswith(pfx.lower()):
-                            title = title[len(pfx):].strip()
                     if not dims or "x" not in dims.lower():
                         dims = "1800x1200 pixels"
                     title, tags, desc = sanitize_invitation_words(title, tags, desc, category)
@@ -1283,23 +1313,22 @@ def main():
                     log(f"    ❌ Both vision and fallback failed — SEO fields will be empty")
                     cat_label = category or "Others"
 
-            # Colour mode from extension
             color_mode = "CMYK" if ext in (".psd", ".psb") else "RGB"
 
             new_rows.append([
-                stem,           # ID
-                dl_url,         # Download URL
-                title,          # Title
-                cat_label,      # Category
-                tags,           # Tags
-                desc,           # Description
-                dims,           # Dimensions
-                "300 DPI",      # DPI
-                file_size,      # File Size
-                color_mode,     # Color Mode
-                "Adobe Photoshop CC",  # Software
-                "",             # Fonts Used
-                preview_url,    # Preview URL
+                stem,                       # ID
+                dl_url,                     # Download URL
+                title,                      # Title
+                cat_label,                  # Category
+                tags,                       # Tags
+                desc,                       # Description
+                dims,                       # Dimensions
+                "300 DPI",                  # DPI
+                file_size,                  # File Size
+                color_mode,                 # Color Mode
+                "Adobe Photoshop CC",       # Software
+                "",                         # Fonts Used
+                preview_url,                # Preview URL
             ])
 
             time.sleep(AI_DELAY)
@@ -1327,9 +1356,10 @@ def main():
 
     log("\n" + "═" * 70)
     log("✅  PIPELINE COMPLETE")
-    log(f"    New files processed : {len(new_rows)}")
-    log(f"    Errors              : {errors}")
-    log(f"    Total rows in xlsx  : {len(final_df)}")
+    log(f"    New files processed    : {len(new_rows)}")
+    log(f"    WebP saved locally     : {webp_saved_locally}  ← committed by git step")
+    log(f"    Errors                 : {errors}")
+    log(f"    Total rows in xlsx     : {len(final_df)}")
     log("═" * 70)
 
     if errors > 0 and len(new_rows) == 0:
