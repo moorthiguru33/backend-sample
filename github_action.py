@@ -613,6 +613,8 @@ def df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
 # max_tokens reduced from 2000 → 900 to prevent runaway generation.
 SEO_PROMPT = """Tamil PSD marketplace SEO expert.
 
+🌐 LANGUAGE: Respond ONLY in ENGLISH. Do NOT write any Chinese, Tamil, Hindi, or any other language. Every word in title, tags, dimensions, and description MUST be English only.
+
 ⚠️ MANDATORY OUTPUT FORMAT — YOU MUST USE THESE EXACT MARKERS OR OUTPUT IS INVALID:
 ##TITLE##
 ##TAGS##
@@ -876,6 +878,15 @@ def clean_tags(tags: str) -> str:
     return ", ".join(clean[:12])
 
 
+def strip_non_english(text: str) -> str:
+    """Remove any CJK / non-Latin characters that Qwen sometimes injects."""
+    # Remove CJK Unified Ideographs, Hiragana, Katakana, Hangul, etc.
+    cleaned = re.sub(r'[\u3000-\u9fff\uac00-\ud7af\uf900-\ufaff\u2e80-\u2eff]+', '', text)
+    # Collapse extra whitespace
+    cleaned = re.sub(r'  +', ' ', cleaned).strip()
+    return cleaned
+
+
 def parse_response(raw: str):
     """Parse structured AI response into (title, tags, dims, desc)."""
     def between(text, start, end=None):
@@ -919,8 +930,9 @@ def parse_response(raw: str):
                     break
 
     # Apply cleaning
-    title = clean_title(title)
-    tags  = clean_tags(tags)
+    title = clean_title(strip_non_english(title))
+    tags  = clean_tags(strip_non_english(tags))
+    desc  = strip_non_english(desc)
 
     dims_m = re.search(r"\d+\s*[xX×]\s*\d+\s*pixels?", dims)
     if dims_m:
@@ -1020,9 +1032,9 @@ def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 5) -> st
                 {"type": "text", "text": full_prompt}
             ]
         }],
-        # FIX: Reduced from 2000 to 900 — enough for title+tags+dims+300-380w description.
-        # This prevents the AI from generating 2000+ word descriptions.
-        "max_tokens": 900,
+        # Increased to 1500 — needed for title+tags+dims+300-380w English description.
+        # 900 was too low and caused short descriptions (~160w). 1500 is the safe ceiling.
+        "max_tokens": 1500,
         "temperature": 0.75,
     }
 
@@ -1098,7 +1110,7 @@ def generate_seo_fallback(filename: str, category: str) -> str:
     payload = {
         "model": VISION_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 900,
+        "max_tokens": 1500,
         "temperature": 0.7,
     }
     try:
