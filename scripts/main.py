@@ -265,7 +265,12 @@ def main() -> None:
 
             # ── 2c: Download archive ──────────────────────────────────────
             dl_dir  = item_dir / "download"
-            archive = download_from_drive(drive_url, dl_dir)
+            archive = download_from_drive(
+                drive_url, dl_dir,
+                client_id=GOOGLE_CLIENT_ID,
+                client_secret=GOOGLE_CLIENT_SECRET,
+                refresh_token=GOOGLE_REFRESH_TOKEN,
+            )
             if not archive:
                 log.error("  Download failed – skipping")
                 errors_this_run += 1
