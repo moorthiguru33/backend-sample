@@ -310,60 +310,29 @@ def scan_gdrive_structure(root_id: str) -> list:
       (file_id, filename, category_name, category_folder_id)
     where category_name = name of the immediate subfolder (or "" for root files).
     category_folder_id is the folder containing this file (needed for move-to-final).
-
-    SKIP LOGIC (3 layers):
-      1. Files inside a 'final' subfolder → already processed, skip.
-      2. Stems from 'final/' subfolder are collected into already_processed_stems
-         so the caller can cross-check even if a file leaked back to the category root.
-      3. Root-level folder named 'final' is always skipped entirely.
+    Skips files already inside a 'final' subfolder (already processed).
     """
     result = []
     items = gdrive_list_folder(root_id)
-
     for item in items:
         name = item["name"]
         fid  = item["id"]
         mime = item["mimeType"]
-
-        if mime != FOLDER_MIME:
-            # Root-level file
+        if mime == FOLDER_MIME:
+            # Category subfolder → list its files (skip 'final' subfolder)
+            if name.lower() == "final":
+                continue
+            sub_items = gdrive_list_folder(fid)
+            for sub in sub_items:
+                if sub["mimeType"] == FOLDER_MIME:
+                    continue  # skip nested folders (including 'final')
+                ext = Path(sub["name"]).suffix.lower()
+                if ext in IMAGE_EXTS:
+                    result.append((sub["id"], sub["name"], name, fid))
+        else:
             ext = Path(name).suffix.lower()
             if ext in IMAGE_EXTS:
                 result.append((fid, name, "", root_id))
-            continue
-
-        # Root-level "final" folder → skip entirely
-        if name.lower() == "final":
-            continue
-
-        # ── Category subfolder ────────────────────────────────────────────
-        sub_items = gdrive_list_folder(fid)
-
-        # Collect stems that are already in this category's 'final/' subfolder
-        # so we can skip them even if move-to-final partially left a copy behind
-        already_in_final: set = set()
-        for sub in sub_items:
-            if sub["mimeType"] == FOLDER_MIME and sub["name"].lower() == "final":
-                try:
-                    final_files = gdrive_list_folder(sub["id"])
-                    for ff in final_files:
-                        already_in_final.add(Path(ff["name"]).stem.lower())
-                except Exception:
-                    pass
-                break  # only one 'final' subfolder per category
-
-        for sub in sub_items:
-            if sub["mimeType"] == FOLDER_MIME:
-                continue  # skip nested folders (including 'final')
-            ext = Path(sub["name"]).suffix.lower()
-            if ext not in IMAGE_EXTS:
-                continue
-            # Skip if this file's stem is already in the 'final/' subfolder
-            if Path(sub["name"]).stem.lower() in already_in_final:
-                log(f"    ⏭  Already in final/: {sub['name']} — skipping")
-                continue
-            result.append((sub["id"], sub["name"], name, fid))
-
     return result
 
 
@@ -683,38 +652,47 @@ def df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
 # ║         AI SEO PROMPT                       ║
 # ╚══════════════════════════════════════════════╝
 
-SEO_PROMPT = """You are a Tamil PSD marketplace SEO expert. Analyze the image and write SEO content.
+SEO_PROMPT = """Tamil PSD marketplace SEO expert.
 
-CRITICAL OUTPUT FORMAT — YOU MUST FOLLOW THIS EXACTLY:
-Write your response using ONLY these exact section markers. No preamble, no "here is", no intro sentence.
-Start your response directly with ##TITLE##
+⚠️ MANDATORY OUTPUT FORMAT — YOU MUST USE THESE EXACT MARKERS OR OUTPUT IS INVALID:
+##TITLE##
+##TAGS##
+##DIMENSIONS##
+##DESCRIPTION##
+
+Begin your response DIRECTLY with ##TITLE## — no preamble, no explanation, no numbering.
+
+CLASSIFY (silent): A=Person/cutout B=Text-only C=Single object | else=standard PSD
+A: Title "[Name] PNG Cutout Download" | no printed name→use FOLDER name from 👤 OVERRIDE
+B: Transliterate Tamil→English. Title "[Text] Title PNG Download"
+C: Title "[Object] PNG Download"
+
+RULES:
+- Read ALL text first — confirms occasion/party/person. Never guess from color/face alone.
+- Visiting card≠banner. Death≠festival. Be precise.
+- ⛔ INVITATION BAN: NEVER use "invitation/invite/invitations/amandhippu/nimantrana" ANYWHERE unless "💌 FOLDER CONTEXT OVERRIDE — INVITATION FOLDER" appears above. Banners are BANNERS, not invitations.
 
 ##TITLE##
-[Write 12-18 word SEO title here in Title Case. End with "PSD Template Download" or "PNG Download" or "PSD Download"]
+12–18 words, Title Case. End: "PSD Template Download" / "PNG Download" / "PSD Download".
+Include: design type + occasion + key visual element + style/color + target audience or region.
+Example: "Elegant Tamil Hindu Wedding Gold Border Flex Banner PSD Template Download"
+UNIQUE per design — vary wording, visual element, and structure every time.
+
 ##TAGS##
-[Write exactly 10 unique lowercase comma-separated keywords here. Include occasion, format, "psd template", 2-3 Tamil transliterated terms. No "free download".]
+10 unique lowercase comma-separated. Include occasion, format, "psd template", 2–3 Tamil transliterated terms. No "free download".
+
 ##DIMENSIONS##
-[Write EXACTLY ONE of these: 1800x1200 pixels | 1050x1500 pixels | 1080x1080 pixels | 2480x3508 pixels | 1050x600 pixels]
+ONE only: 1800x1200 pixels | 1050x1500 pixels | 1080x1080 pixels | 2480x3508 pixels | 1050x600 pixels
+
 ##DESCRIPTION##
-[Write 400-500 words. 4 paragraphs. Describe ONLY what is visible — concept, style, colors, usage.
-Para 1 (80-100w): Design concept and mood — theme, cultural context, overall feel.
-Para 2 (100-120w): Exact colors by name, background style, border/frame details, decorative motifs, typography.
-Para 3 (80-100w): Layout — element arrangement, photo placeholder position, text zones, decorative accents.
-Para 4 (80-100w): Who uses this, for what purpose, what occasions it fits.]
+400–500 WORDS. UNIQUE per design. Describe ONLY what is visible — concept, style, colors, usage.
+No Photoshop/file/DPI/software/password mentions. No generic filler.
+Para 1 (80–100w): Design concept & mood — what makes this design unique, the theme, cultural context, and overall feel.
+Para 2 (100–120w): Exact colors by name, background style, border/frame details, decorative motifs, patterns, and typography style — all based on what is actually visible in THIS design.
+Para 3 (80–100w): Layout details — how elements are arranged, photo placeholder position, text zones, decorative accents, and spacing style.
+Para 4 (80–100w): Who uses this, for what specific purpose, and what occasions or events it fits perfectly.
 
-CLASSIFICATION RULES:
-- A=Person/cutout: Title "[Name] PNG Cutout Download" | no printed name → use folder context name
-- B=Text-only design: Transliterate Tamil→English. Title "[Text] Title PNG Download"
-- C=Single object: Title "[Object] PNG Download"
-- else=standard PSD design
-
-IMPORTANT RULES:
-- Read ALL visible text first — confirms occasion/party/person. Never guess from color/face alone.
-- Visiting card ≠ banner. Death ≠ festival. Be precise.
-- ⛔ NEVER use "invitation/invite/invitations/amandhippu/nimantrana" UNLESS folder context explicitly says INVITATION FOLDER.
-- Title must be UNIQUE and specific to THIS design — vary wording, visual element, structure every time.
-- Write ONLY in ENGLISH. Do not write in Tamil script.
-- Use Title Case for the title only.
+REMINDER: Your entire response MUST start with ##TITLE## and include all four markers.
 """
 
 
@@ -876,117 +854,64 @@ def get_folder_context(subfolder: str) -> dict:
 # ╚══════════════════════════════════════════════╝
 
 def parse_response(raw: str):
-    """
-    Parse structured AI response into (title, tags, dims, desc).
-
-    ROBUST MULTI-FORMAT PARSER:
-    Handles several output styles the Qwen2.5-VL model uses in practice:
-      Format A: ##TITLE## on its own line, content on next line(s)
-      Format B: ##TITLE## followed by content on the SAME line
-      Format C: **TITLE** or **##TITLE##** (markdown bold markers)
-      Format D: "Title:" or "SEO Title:" label style (no ## markers)
-    The parser tries all formats in order and uses the first match.
-    """
-    def _between(text: str, start_marker: str, end_marker: str = None) -> str:
-        """Extract text between two markers (case-insensitive marker search)."""
-        idx = text.lower().find(start_marker.lower())
-        if idx == -1:
+    """Parse structured AI response into (title, tags, dims, desc). Robust fallbacks."""
+    def between(text, start, end=None):
+        s = text.find(start)
+        if s == -1:
             return ""
-        start = idx + len(start_marker)
-        if end_marker:
-            end_idx = text.lower().find(end_marker.lower(), start)
-            return text[start:end_idx].strip() if end_idx != -1 else text[start:].strip()
-        return text[start:].strip()
+        s += len(start)
+        if end:
+            e = text.find(end, s)
+            return text[s:e].strip() if e != -1 else text[s:].strip()
+        return text[s:].strip()
 
-    def _first_line(block: str) -> str:
-        """Return first non-empty line of a block."""
-        for line in block.splitlines():
-            s = line.strip()
-            if s:
-                return s
-        return ""
+    title = between(raw, "##TITLE##",       "##TAGS##")
+    tags  = between(raw, "##TAGS##",        "##DIMENSIONS##")
+    dims  = between(raw, "##DIMENSIONS##",  "##DESCRIPTION##")
+    desc  = between(raw, "##DESCRIPTION##")
 
-    # ── Try Format A/B — standard ## markers ─────────────────────────────
-    title = _between(raw, "##TITLE##",       "##TAGS##")
-    tags  = _between(raw, "##TAGS##",        "##DIMENSIONS##")
-    dims  = _between(raw, "##DIMENSIONS##",  "##DESCRIPTION##")
-    desc  = _between(raw, "##DESCRIPTION##")
-
-    # ── Try **##TITLE##** (Qwen sometimes wraps markers in bold) ─────────
+    # Fallback: AI sometimes writes **TITLE** or *TITLE* instead of ##TITLE##
     if not title:
-        title = _between(raw, "**##TITLE##**", "##TAGS##") or \
-                _between(raw, "**##TITLE##**", "**##TAGS##**")
+        for pat in [r"\*{1,2}TITLE\*{1,2}[:\s]+(.+)", r"Title[:\s]+(.+)", r"^([A-Z].{10,80}(?:Download|Template|PSD))"]:
+            m = re.search(pat, raw, re.IGNORECASE | re.MULTILINE)
+            if m:
+                title = m.group(1).strip()
+                break
+
+    # Fallback: first non-empty line if still no title
+    if not title:
+        for line in raw.split("\n"):
+            line = line.strip().strip("#").strip("*").strip()
+            if len(line) > 15:
+                title = line
+                break
+
+    # Fallback: tags from any comma-separated line if not found
     if not tags:
-        tags  = _between(raw, "**##TAGS##**", "##DIMENSIONS##") or \
-                _between(raw, "**##TAGS##**", "**##DIMENSIONS##**")
-    if not dims:
-        dims  = _between(raw, "**##DIMENSIONS##**", "##DESCRIPTION##") or \
-                _between(raw, "**##DIMENSIONS##**", "**##DESCRIPTION##**")
-    if not desc:
-        desc  = _between(raw, "**##DESCRIPTION##**")
+        for line in raw.split("\n"):
+            if "," in line and len(line.split(",")) >= 4:
+                stripped = line.strip().strip("#").strip("*").strip()
+                if not stripped.startswith("Para") and len(stripped) < 300:
+                    tags = stripped
+                    break
 
-    # ── Fallback: label-style "Title: ..." (no ## markers) ───────────────
-    if not title:
-        for label in ["SEO Title:", "Title:", "**Title:**", "**SEO Title:**"]:
-            val = _between(raw, label, "\n")
-            if val:
-                title = val
-                break
-    if not tags:
-        for label in ["Tags:", "SEO Tags:", "**Tags:**", "Keywords:"]:
-            val = _between(raw, label, "\n")
-            if val:
-                tags = val
-                break
-    if not dims:
-        for label in ["Dimensions:", "**Dimensions:**", "Size:"]:
-            val = _between(raw, label, "\n")
-            if val:
-                dims = val
-                break
-    if not desc:
-        for label in ["Description:", "SEO Description:", "**Description:**"]:
-            val = _between(raw, label)
-            if val and len(val.split()) > 20:
-                desc = val
-                break
-
-    # ── Last resort: use first line as title ──────────────────────────────
-    if not title:
-        lines = [l.strip() for l in raw.split("\n") if l.strip()]
-        if lines:
-            title = lines[0]
-
-    # ── Cleanup: remove bracket artefacts ────────────────────────────────
-    for ch in ["[", "]", "**"]:
+    for ch in ["[", "]"]:
         title = title.replace(ch, "").strip()
         tags  = tags.replace(ch, "").strip()
         dims  = dims.replace(ch, "").strip()
 
-    # Strip label prefixes from title if model echoed them
-    for pfx in ["Title:", "SEO Title:", "Output:", "Answer:", "##TITLE##"]:
+    # Clean label prefixes from title
+    for pfx in ["Title:", "SEO Title:", "Output:", "Answer:", "TITLE:"]:
         if title.lower().startswith(pfx.lower()):
             title = title[len(pfx):].strip()
 
-    # ── Normalise dimensions to "NNNNxNNNN pixels" format ────────────────
-    dims_m = re.search(r'\d+\s*[xX×]\s*\d+\s*pixels?', dims)
+    dims_m = re.search(r"\d+\s*[xX×]\s*\d+\s*pixels?", dims)
     if dims_m:
         dims = dims_m.group(0).replace(" ", "").replace("×", "x").replace("X", "x")
         if not dims.endswith("pixels"):
             dims += " pixels"
-
-    # ── Deduplicate and clean tags ────────────────────────────────────────
-    if tags:
-        seen, clean_tags = set(), []
-        for t in [x.strip().lower() for x in re.split(r"[,\n]", tags) if x.strip()]:
-            if t not in seen:
-                seen.add(t)
-                clean_tags.append(t)
-        tags = ", ".join(clean_tags)
-
-    # ── Sanity log ────────────────────────────────────────────────────────
-    log(f"    📝 Parsed → Title: {'✅' if title else '❌'}  Tags: {'✅' if tags else '❌'}  "
-        f"Dims: {'✅' if dims else '❌'}  Desc: {'✅ ' + str(len(desc.split())) + 'w' if desc else '❌'}")
+    if not dims or "x" not in dims.lower():
+        dims = "1800x1200 pixels"
 
     return title, tags, dims, desc
 
@@ -1048,20 +973,9 @@ def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 5) -> st
     """
     Call ModelScope Qwen2.5-VL with an image and the SEO prompt.
     Returns the raw text response.
-
-    KEY FIXES vs original:
-      • Logs the first 500 chars of every response for debugging
-      • Handles HTTP 401/403 immediately (bad token — no point retrying)
-      • Smarter retry delays that don't block the pipeline for hours
-      • Token validity check before the first call
+    Note: We still send the image as JPEG base64 to the AI (WebP is for storage).
     """
-    if not MODELSCOPE_TOKEN:
-        log("    ❌ MODELSCOPE_TOKEN (secret: SCOPE) is empty — cannot call AI!")
-        log("       Go to GitHub → repo Settings → Secrets → add SCOPE = your ModelScope token")
-        return ""
-
     full_prompt = (folder_hint.strip() + "\n\n" if folder_hint.strip() else "") + SEO_PROMPT
-
     headers = {
         "Authorization": f"Bearer {MODELSCOPE_TOKEN}",
         "Content-Type":  "application/json",
@@ -1078,96 +992,103 @@ def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 5) -> st
                 {"type": "text", "text": full_prompt}
             ]
         }],
-        "max_tokens": 1500,
+        "max_tokens": 2000,
         "temperature": 0.75,
     }
 
     for attempt in range(retries):
         try:
             resp = requests.post(
-                MODELSCOPE_API, headers=headers, json=payload, timeout=180
+                MODELSCOPE_API, headers=headers, json=payload, timeout=120
             )
-
-            log(f"    📡 ModelScope HTTP {resp.status_code} (attempt {attempt+1}/{retries})")
-
-            # ── Token / auth error — no point retrying ────────────────────
-            if resp.status_code in (401, 403):
-                log(f"    ❌ ModelScope auth error {resp.status_code}: {resp.text[:300]}")
-                log("       Check your SCOPE secret — token may be expired or wrong.")
-                return ""
 
             # ── HTTP 429 rate limit ───────────────────────────────────────
             if resp.status_code == 429:
-                wait = min(60 * (attempt + 1), 180)
-                log(f"    ⚠  HTTP 429 rate-limit — waiting {wait}s")
+                wait = 60 * (attempt + 1)
+                log(f"    ⚠  ModelScope HTTP 429 rate-limit (attempt {attempt+1}/{retries}) — waiting {wait}s")
                 time.sleep(wait)
                 continue
 
-            # ── Transient server errors (retry with backoff) ──────────────
-            if resp.status_code in (500, 502, 503, 504):
+            # ── HTTP 502/503/504 transient server errors ──────────────────
+            if resp.status_code in (502, 503, 504):
                 wait = 30 * (attempt + 1)
-                log(f"    ⚠  HTTP {resp.status_code} transient error — waiting {wait}s")
+                log(f"    ⚠  ModelScope HTTP {resp.status_code} transient error (attempt {attempt+1}/{retries}) — waiting {wait}s")
                 time.sleep(wait)
                 continue
 
-            # ── Parse JSON body ───────────────────────────────────────────
-            try:
-                data = resp.json()
-            except Exception:
-                log(f"    ⚠  ModelScope response is not JSON: {resp.text[:300]}")
-                time.sleep(20)
-                continue
-
-            # Log first 400 chars so we can debug empty responses
-            raw_preview = str(data)[:400]
-            log(f"    🔍 Response preview: {raw_preview}")
+            data = resp.json()
 
             # ── Successful response ───────────────────────────────────────
-            if "choices" in data and data["choices"]:
-                content = data["choices"][0]["message"]["content"]
-                if content and content.strip():
-                    return content.strip()
-                log(f"    ⚠  ModelScope returned empty content — retrying")
-                time.sleep(15)
-                continue
+            if "choices" in data:
+                raw_content = data["choices"][0]["message"]["content"].strip()
+                log(f"    📝 AI raw (first 200 chars): {raw_content[:200]!r}")
+                return raw_content
 
             # ── API-level error in response body ──────────────────────────
             err_obj  = data.get("error", {})
             err_code = str(err_obj.get("code", "")).lower() if isinstance(err_obj, dict) else ""
-            err_msg  = str(err_obj.get("message",
-                           data.get("message", str(data)[:300]))).lower()
+            err_msg  = str(err_obj.get("message", data.get("message", str(data)[:300]))).lower()
 
-            if "quota" in err_msg or "quota" in err_code or "balance" in err_msg:
-                wait = min(90 * (attempt + 1), 300)
-                log(f"    ⚠  Quota/balance error — waiting {wait}s: {err_msg[:200]}")
+            if "quota" in err_msg or "quota" in err_code:
+                wait = 90 * (attempt + 1)
+                log(f"    ⚠  ModelScope quota error (attempt {attempt+1}/{retries}) — waiting {wait}s: {err_msg[:200]}")
                 time.sleep(wait)
                 continue
 
             if "rate" in err_msg or "throttl" in err_msg:
-                wait = min(60 * (attempt + 1), 180)
-                log(f"    ⚠  Rate-limit error — waiting {wait}s")
+                wait = 60 * (attempt + 1)
+                log(f"    ⚠  ModelScope rate-limit error (attempt {attempt+1}/{retries}) — waiting {wait}s")
                 time.sleep(wait)
                 continue
 
-            log(f"    ⚠  ModelScope unexpected response (attempt {attempt+1}): {str(data)[:300]}")
+            log(f"    ⚠  ModelScope no choices (attempt {attempt+1}/{retries}): {str(data)[:300]}")
 
-        except requests.exceptions.Timeout:
-            log(f"    ⚠  ModelScope request timed out (attempt {attempt+1}/{retries})")
         except Exception as e:
             log(f"    ⚠  ModelScope request error (attempt {attempt+1}/{retries}): {e}")
 
         if attempt < retries - 1:
-            wait = 20 * (attempt + 1)
-            log(f"    ⏳ Waiting {wait}s before retry...")
-            time.sleep(wait)
+            time.sleep(20 * (attempt + 1))
 
-    log("    ❌ ModelScope: all retries exhausted — AI fields will be empty for this file")
     return ""
 
 
 # ╔══════════════════════════════════════════════╗
 # ║         MAIN PIPELINE                       ║
 # ╚══════════════════════════════════════════════╝
+
+def generate_seo_fallback(filename: str, category: str) -> str:
+    """
+    Text-only fallback: generate SEO content when vision AI fails.
+    Uses filename + category as context. Called by ModelScope text endpoint.
+    Returns raw AI response string (same format as call_modelscope).
+    """
+    stem = Path(filename).stem
+    prompt = (
+        f"You are a Tamil PSD marketplace SEO expert.\n"
+        f"Generate SEO content for a Tamil PSD design file.\n"
+        f"File name: {stem}\n"
+        f"Category folder: {category or 'General'}\n\n"
+        + SEO_PROMPT
+    )
+    headers = {
+        "Authorization": f"Bearer {MODELSCOPE_TOKEN}",
+        "Content-Type":  "application/json",
+    }
+    payload = {
+        "model": VISION_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 2000,
+        "temperature": 0.7,
+    }
+    try:
+        resp = requests.post(MODELSCOPE_API, headers=headers, json=payload, timeout=90)
+        data = resp.json()
+        if "choices" in data:
+            return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        log(f"    ⚠  Text-only fallback also failed: {e}")
+    return ""
+
 
 def main():
     log("\n" + "═" * 70)
@@ -1205,36 +1126,13 @@ def main():
     # ── STEP 2: Scan GDrive PSD folder ───────────────────────────────────────
     log(f"\n📂 STEP 2 — Scanning Google Drive folder: {GDRIVE_PSD_FOLDER}")
     all_files = scan_gdrive_structure(GDRIVE_PSD_FOLDER)
-    log(f"  📄 Total files in GDrive (excluding final/): {len(all_files)}")
-
-    # ── STEP 2b: Pre-fetch existing ZIPs from upload folder ───────────────────
-    # This is the SECOND skip guard: even if a file is not in existing_ids
-    # (e.g. xlsx push failed on a previous run), if the ZIP already exists in
-    # GDRIVE_UPLOAD_FOLDER we know the file was processed — skip it.
-    log(f"\n🔍 STEP 2b — Pre-fetching existing ZIPs from upload folder…")
-    existing_zips: set = set()   # lowercase stems, e.g. {"tamilpsd-0349", ...}
-    try:
-        zip_items = gdrive_list_folder(GDRIVE_UPLOAD_FOLDER)
-        for zi in zip_items:
-            if zi["name"].lower().endswith(".zip"):
-                existing_zips.add(Path(zi["name"]).stem.lower())
-        log(f"  📊 ZIPs already in upload folder: {len(existing_zips)}")
-    except Exception as e:
-        log(f"  ⚠  Could not pre-fetch ZIPs (non-fatal): {e}")
+    log(f"  📄 Total files in GDrive: {len(all_files)}")
 
     new_files = [
         (fid, fname, cat, cat_fid) for fid, fname, cat, cat_fid in all_files
-        if Path(fname).stem not in existing_ids                        # guard 1: xlsx
-        and Path(fname).stem.lower() not in existing_zips             # guard 2: zip exists
+        if Path(fname).stem not in existing_ids
     ]
-    already_done_zip = sum(
-        1 for _, fname, _, _ in all_files
-        if Path(fname).stem.lower() in existing_zips
-        and Path(fname).stem not in existing_ids
-    )
-    log(f"  ⏭  Skipped — already in xlsx   : {len(all_files) - len(new_files) - already_done_zip}")
-    log(f"  ⏭  Skipped — ZIP exists (no xlsx row): {already_done_zip}  ← these were uploaded but xlsx push failed previously")
-    log(f"  🆕 New files (not yet processed): {len(new_files)}")
+    log(f"  🆕 New files (not yet in xlsx): {len(new_files)}")
 
     if not new_files:
         log("\n✅ Nothing new to process — designs.xlsx is already up to date!")
@@ -1337,7 +1235,7 @@ def main():
                 log(f"    ⚠  No category_folder_id — skipping move to final/")
 
             # ── 3g. ModelScope vision AI ─────────────────────────────────────
-            log(f"    🤖 Running AI vision analysis (ModelScope {VISION_MODEL})…")
+            log(f"    🤖 Running AI vision analysis (ModelScope Qwen2.5-VL)…")
             folder_ctx   = get_folder_context(category)
             folder_hint  = folder_ctx.get("ai_hint", "")
             cat_override = folder_ctx.get("category_hint", "")
@@ -1345,8 +1243,6 @@ def main():
             ai_raw = call_modelscope(jpg_b64, folder_hint)
 
             title = tags = dims = desc = ""
-            cat_label = cat_override or category or "Others"
-
             if ai_raw:
                 title, tags, dims, desc = parse_response(ai_raw)
 
@@ -1361,19 +1257,31 @@ def main():
                 title, tags, desc = sanitize_invitation_words(title, tags, desc, category)
                 desc = truncate_description(desc)
 
-                log(f"    ✅ Title    : {title[:80]}")
+                # Category: use override if any, else subfolder name, else "Others"
+                cat_label = cat_override or category or "Others"
+
+                log(f"    ✅ Title    : {title[:70]}")
                 log(f"    ✅ Category : {cat_label}")
-                log(f"    ✅ Tags     : {tags[:80]}…")
+                log(f"    ✅ Tags     : {tags[:70]}…")
                 log(f"    ✅ Dims     : {dims}  |  Desc: {len(desc.split())}w")
                 log(f"    🔗 DL: {'✅' if dl_url else '❌'}  Preview: {'✅' if preview_url else '❌'}")
-
-                if not title:
-                    log(f"    ⚠  Title is EMPTY after parsing — check ModelScope response above")
-                if len(desc.split()) < 100:
-                    log(f"    ⚠  Description very short ({len(desc.split())}w) — ModelScope may not have followed prompt format")
             else:
-                log(f"    ⚠  AI returned empty — SEO fields will be empty for this file")
-                log(f"       Tip: check SCOPE secret, ModelScope quota, and model availability")
+                log(f"    ⚠  AI vision returned empty — trying text-only fallback...")
+                ai_raw = generate_seo_fallback(filename, category)
+                if ai_raw:
+                    title, tags, dims, desc = parse_response(ai_raw)
+                    for pfx in ["Title:", "SEO Title:", "Output:", "Answer:"]:
+                        if title.lower().startswith(pfx.lower()):
+                            title = title[len(pfx):].strip()
+                    if not dims or "x" not in dims.lower():
+                        dims = "1800x1200 pixels"
+                    title, tags, desc = sanitize_invitation_words(title, tags, desc, category)
+                    desc = truncate_description(desc)
+                    cat_label = cat_override or category or "Others"
+                    log(f"    ✅ Fallback Title: {title[:70]}")
+                else:
+                    log(f"    ❌ Both vision and fallback failed — SEO fields will be empty")
+                    cat_label = category or "Others"
 
             # Colour mode from extension
             color_mode = "CMYK" if ext in (".psd", ".psb") else "RGB"
