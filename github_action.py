@@ -61,7 +61,8 @@ MODELSCOPE_API = "https://api-inference.modelscope.ai/v1/chat/completions"
 VISION_MODEL   = "Qwen/Qwen2.5-VL-72B-Instruct"
 
 # ── Processing limits ─────────────────────────────────────────────────────────
-MAX_PER_RUN = 50     # max new files to process per workflow run
+_env_count  = int(os.environ.get("FILE_COUNT", "0"))
+MAX_PER_RUN = _env_count if _env_count > 0 else 50   # default 50; set FILE_COUNT env to override
 AI_DELAY    = 5      # seconds between AI calls
 
 # ── WebP preview settings ─────────────────────────────────────────────────────
