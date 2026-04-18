@@ -200,7 +200,6 @@ def download_from_drive(
             id=file_id,
             output=str(dest_dir) + "/",
             quiet=False,
-            fuzzy=True,
         )
         if output is not None:
             downloaded = Path(output)
