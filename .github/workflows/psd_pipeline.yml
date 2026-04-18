@@ -18,10 +18,17 @@
 name: Tamil PSD Pipeline
 
 on:
-  # ── Manual trigger from GitHub Actions UI ─────────────────────────────────
   workflow_dispatch:
+    inputs:
+      file_count:
+        description: >
+          How many PSD files to process this run.
+          10  = process 10 files.
+          100 = process 100 files.
+          0   = use default (50 files).
+        required: false
+        default: '0'
 
-  # ── Scheduled: run every 6 hours automatically ────────────────────────────
   schedule:
     - cron: '0 */6 * * *'
 
@@ -84,6 +91,7 @@ jobs:
           SCOPE:                ${{ secrets.SCOPE }}
           GH_PAT:               ${{ secrets.GH_PAT }}
           GITHUB_TOKEN:         ${{ secrets.GITHUB_TOKEN }}
+          FILE_COUNT:           ${{ github.event.inputs.file_count || '0' }}
         run: python github_action.py
 
       # ── 6. Summary ──────────────────────────────────────────────────────────
