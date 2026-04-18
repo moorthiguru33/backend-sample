@@ -29,6 +29,13 @@ File counter continuity
 ───────────────────────
   counter = max(state.json, Drive scan max, rename_log.xlsx max) + 1
   state.json is now minimal: only stores file_counter + last_run.
+
+FIX: Fresh download URL on every run
+──────────────────────────────────────
+  forpsd.com encodes a JWT token in the /download/ URL that can expire
+  between scrape time and processing time. When resolve_drive_url() fails,
+  the code now re-scrapes the product detail page to obtain a fresh
+  /download/ URL before giving up and marking the item as Error.
 """
 
 import logging
@@ -60,8 +67,8 @@ from job_tracker import JobTracker
 POSTS_PER_PAGE: int = 17
 
 _REPO_ROOT      = Path(STATE_FILE).parent
-EXCEL_LOG_FILE  = str(_REPO_ROOT / "rename_log.xlsx")   # ExcelTracker: original→renamed
-JOBS_EXCEL_FILE = str(_REPO_ROOT / "jobs.xlsx")          # JobTracker: URL status
+EXCEL_LOG_FILE  = str(_REPO_ROOT / "rename_log.xlsx")
+JOBS_EXCEL_FILE = str(_REPO_ROOT / "jobs.xlsx")
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -94,41 +101,33 @@ def check_secrets() -> bool:
 # ── Scraping ───────────────────────────────────────────────────────────────
 
 def _full_scrape(scraper: ForPSDScraper, job_tracker: JobTracker) -> int:
-    """
-    Full scrape from page 1 to end.
-    Adds ALL found URLs as Pending in ONE batch xlsx write.
-    """
     log.info("🌐 Full scrape: page 1 → end (all pages, no stop condition)…")
     all_items = scraper.get_all_items(
         page_limit=PAGE_LIMIT,
-        stop_at_known_urls=None,   # no skip — we want everything
+        stop_at_known_urls=None,
         start_page=1,
-        max_new_items=0,           # unlimited
+        max_new_items=0,
     )
     if not all_items:
         log.warning("Full scrape returned 0 items — check FORPSD_COOKIE and site.")
         return 0
 
     log.info(f"Full scrape complete: {len(all_items)} items found. Saving to jobs.xlsx…")
-    added = job_tracker.add_pending_items(all_items)   # ← single batch write
+    added = job_tracker.add_pending_items(all_items)
     log.info(f"📋 jobs.xlsx: +{added} new Pending (total: {job_tracker.total()})")
     return added
 
 
 def _rescrape_for_new(scraper: ForPSDScraper, job_tracker: JobTracker,
                       item_limit: int) -> int:
-    """
-    Re-scrape from PAGE 1 (newest items first) using stop_at_known_urls
-    for early termination. Used ONLY when all known items are Completed.
-    """
     known_urls = job_tracker.all_known_urls()
     log.info(
         f"🌐 Re-scrape from page 1 (looking for items not in {len(known_urls)} known URLs)…"
     )
     new_items = scraper.get_all_items(
         page_limit=PAGE_LIMIT,
-        stop_at_known_urls=known_urls,   # stops when a full page is all-known
-        start_page=1,                    # ALWAYS page 1 for new items
+        stop_at_known_urls=known_urls,
+        start_page=1,
         max_new_items=item_limit if item_limit > 0 else 0,
     )
     if not new_items:
@@ -140,14 +139,8 @@ def _rescrape_for_new(scraper: ForPSDScraper, job_tracker: JobTracker,
 
 def _topup_scrape(scraper: ForPSDScraper, job_tracker: JobTracker,
                   item_limit: int) -> int:
-    """
-    Targeted scrape to top up pending count when ITEM_LIMIT is set
-    but fewer than ITEM_LIMIT items are pending.
-    Starts from the page where new items would appear next.
-    """
     known_urls = job_tracker.all_known_urls()
     done_count = job_tracker.completed_count()
-    # New unprocessed items are on pages AFTER all done items
     start_page = max(1, (done_count // POSTS_PER_PAGE))
     needed     = item_limit - len(job_tracker.get_pending())
 
@@ -197,6 +190,52 @@ def _list_archive_originals(archive_path: Path) -> list[str]:
     return names
 
 
+# ── FIX: Resolve Drive URL with automatic fresh-URL fallback ──────────────
+
+def _resolve_drive_url_with_retry(
+    scraper: ForPSDScraper,
+    download_url: str,
+    detail_url: str,
+) -> str | None:
+    """
+    Resolve the forpsd /download/ URL to a Google Drive URL.
+
+    Step 1: Try the stored download_url directly.
+    Step 2: If that fails and we have a detail_url, re-scrape the product
+            page to get a fresh /download/ URL (the JWT token may have
+            expired since it was scraped), then try resolving again.
+    Returns the Google Drive URL, or None if both attempts fail.
+    """
+    # ── Attempt 1: stored URL ─────────────────────────────────────────────
+    drive_url = scraper.resolve_drive_url(download_url)
+    if drive_url:
+        return drive_url
+
+    # ── Attempt 2: fresh URL from detail page ─────────────────────────────
+    if not detail_url:
+        log.warning("  resolve_drive_url failed and no detail_url available — cannot retry")
+        return None
+
+    log.warning("  Stored download URL failed — fetching fresh URL from detail page…")
+    fresh_dl_url = scraper.get_fresh_download_url(detail_url)
+    if not fresh_dl_url:
+        log.warning("  Could not obtain fresh download URL from detail page")
+        return None
+
+    if fresh_dl_url == download_url:
+        # Same URL — site hasn't changed, permanent failure
+        log.warning("  Fresh URL is identical to stored URL — permanent failure")
+        return None
+
+    log.info(f"  Retrying with fresh URL: {fresh_dl_url}")
+    drive_url = scraper.resolve_drive_url(fresh_dl_url)
+    if drive_url:
+        log.info(f"  ✅ Fresh URL resolved successfully")
+    else:
+        log.warning("  Fresh URL also failed to resolve Drive URL")
+    return drive_url
+
+
 # ── Main ───────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -219,14 +258,13 @@ def main() -> None:
     uploader = DriveUploader(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN)
 
     # ── Load trackers ──────────────────────────────────────────────────────
-    job_tracker    = JobTracker(JOBS_EXCEL_FILE)     # PRIMARY: URL → status
-    rename_tracker = ExcelTracker(EXCEL_LOG_FILE)    # file naming log
-    state          = StateManager(STATE_FILE)         # only: file_counter + last_run
+    job_tracker    = JobTracker(JOBS_EXCEL_FILE)
+    rename_tracker = ExcelTracker(EXCEL_LOG_FILE)
+    state          = StateManager(STATE_FILE)
 
     log.info(f"📋 Job tracker:    {job_tracker.stats()}")
     log.info(f"📊 Rename tracker: {rename_tracker.stats()}")
 
-    # Preload all Drive filenames once (cross-subfolder duplicate guard)
     uploader.preload_existing_names(GDRIVE_PSD_FOLDER)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -334,15 +372,19 @@ def main() -> None:
                 else:
                     category = "uncategorized"
                     log.warning("  No detail URL or card_title — using 'uncategorized'")
-                # Cache in memory (saved to xlsx on mark_completed)
                 job_tracker.update_category(download_url, category)
 
             log.info(f"  Category: [{category}]")
 
-            # ── Resolve Google Drive URL ──────────────────────────────────
-            drive_url = scraper.resolve_drive_url(download_url)
+            # ── FIX: Resolve Google Drive URL with fresh-URL fallback ─────
+            # Previously: one attempt only → mark Error if failed.
+            # Now: if the stored /download/ URL fails (JWT expired), we
+            # re-scrape the detail page to get a fresh URL and retry once.
+            drive_url = _resolve_drive_url_with_retry(
+                scraper, download_url, detail_url
+            )
             if not drive_url:
-                log.warning("  Could not resolve Drive URL — marking Error (retry next run)")
+                log.warning("  Could not resolve Drive URL (both attempts failed) — marking Error")
                 job_tracker.mark_error(download_url)
                 errors_this_run += 1
                 continue
@@ -393,7 +435,6 @@ def main() -> None:
 
             renamed_files, next_index = result
 
-            # Map: renamed_path → original_name
             orig_map: dict[Path, str] = {}
             for idx, renamed_path in enumerate(renamed_files):
                 orig_name = original_names[idx] if idx < len(original_names) else renamed_path.name

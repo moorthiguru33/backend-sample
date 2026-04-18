@@ -246,20 +246,6 @@ class ForPSDScraper:
     # ════════════════════════════════════════════════════════════════════════
 
     def _detect_category_from_title(self, title: str) -> str:
-        """
-        Run the keyword rules against a post title and return the folder name.
-
-        All keywords in a rule must appear as substrings in the lowercased
-        title. First matching rule wins.
-
-        Examples:
-          "Dr Ambedkar - flex - banner"  → "ambedkar"
-          "Wedding flex banner"           → "wedding-flex"
-          "Wedding invitation card"       → "wedding-invitation"
-          "DMK calendar 2025"             → "dmk-calendar"
-          "Vijay actor flex"              → "vijay"
-          "Ear piercing flex banner"      → "earpiercing-flex"
-        """
         if not title:
             return "uncategorized"
 
@@ -274,21 +260,11 @@ class ForPSDScraper:
         return "uncategorized"
 
     def _extract_post_title(self, soup: BeautifulSoup) -> str:
-        """
-        Extract the file description / post title from a product detail page.
-
-        Priority:
-          1. <p> containing "File :" prefix → strip the prefix and disclaimer.
-          2. First meaningful <h1>/<h2>/<h3>.
-          3. <title> tag (strip site name suffix).
-        """
         # Strategy 1: paragraph with "File :" prefix
         for p in soup.find_all("p"):
             text = p.get_text(separator=" ", strip=True)
             if re.search(r"file\s*:", text, re.I):
-                # Remove "File :6362 -" prefix
                 cleaned = re.sub(r"(?i)^\s*file\s*:\s*\d*\s*", "", text).strip(" -–")
-                # Remove disclaimer "this file not suitable for photoshop 7.0 and cs3 -"
                 cleaned = re.sub(
                     r"(?i)this\s+file\s+not\s+suitable[^-–]*[-–]?\s*", "", cleaned
                 ).strip(" -–")
@@ -316,16 +292,6 @@ class ForPSDScraper:
 
     # ── Public: resolve category from product detail page ─────────────────
     def get_category(self, product_detail_url: str, hint_title: str = "") -> str:
-        """
-        Determine the Drive subfolder category for a product.
-
-        1. If hint_title is supplied (from the listing card), try matching it
-           first — avoids an extra HTTP request.
-        2. Otherwise fetch the product detail page, extract the file title,
-           and apply keyword matching.
-        3. Returns "uncategorized" on any failure.
-        """
-        # Fast path — card title already captured during listing scrape
         if hint_title:
             category = self._detect_category_from_title(hint_title)
             if category != "uncategorized":
@@ -349,6 +315,33 @@ class ForPSDScraper:
         log.info(f"  → Category: [{category}]")
         return category
 
+    # ── FIX: Re-scrape a detail page to get a fresh /download/ URL ─────────
+    def get_fresh_download_url(self, detail_url: str) -> str | None:
+        """
+        Re-scrape a product detail page to obtain a fresh /download/ URL.
+
+        Called when the stored download_url has expired (JWT token timeout)
+        and resolve_drive_url returns None. Returns the new absolute download
+        URL, or None if it cannot be found.
+        """
+        if not detail_url:
+            return None
+
+        log.info(f"  🔄 Re-scraping detail page for fresh download URL: {detail_url}")
+        soup = self._get(detail_url)
+        if soup is None:
+            log.warning(f"  Could not fetch detail page: {detail_url}")
+            return None
+
+        tag = soup.find("a", href=re.compile(r"/download/"))
+        if tag:
+            fresh_url = urljoin(BASE_URL, tag["href"])
+            log.info(f"  ✅ Fresh download URL: {fresh_url}")
+            return fresh_url
+
+        log.warning(f"  No /download/ link found on detail page: {detail_url}")
+        return None
+
     # ── Collect all download links + product detail URLs ──────────────────
     def get_all_items(
         self,
@@ -369,23 +362,14 @@ class ForPSDScraper:
 
         start_page (int):
           Start scraping from this page number instead of page 1.
-          Used for targeted scraping — when done_count is known, the
-          caller calculates exactly which page contains the next new items.
-          E.g. 34 items done → start_page=3, 30 done → start_page=2.
 
         max_new_items (int):
           Stop once this many new items are collected (0 = no limit).
-          Combined with start_page, this means we fetch only the exact
-          1–2 pages needed for the current ITEM_LIMIT instead of scraping
-          all 400+ pages.
 
         stop_at_known_urls (set):
           When provided, URLs in this set are skipped (not counted as new).
           In incremental mode this also triggers early-stop when an entire
           page yields zero new URLs.
-
-        The card_title is passed as hint_title to get_category() so that
-        detail-page fetches are only needed when the card has no title.
         """
         items: list[dict] = []
         seen_downloads: set[str] = set()
@@ -430,7 +414,6 @@ class ForPSDScraper:
                     continue
                 seen_downloads.add(dl_url)
 
-                # Incremental mode: skip URLs we already have in state
                 if incremental and dl_url in stop_at_known_urls:
                     continue
 
@@ -455,8 +438,6 @@ class ForPSDScraper:
 
             log.info(f"  Page {page}: +{new_this_page} new items  (running total {len(items)})")
 
-            # Early stop: collected enough items for this run.
-            # Checked first so we never fetch an extra page unnecessarily.
             if max_new_items > 0 and len(items) >= max_new_items:
                 log.info(
                     f"  Reached max_new_items={max_new_items} — "
@@ -464,8 +445,6 @@ class ForPSDScraper:
                 )
                 break
 
-            # Early stop: in incremental mode, if this page had zero new items
-            # every further page will also be all-known — no need to continue.
             if incremental and new_this_page == 0:
                 log.info(
                     f"  Page {page} had no new URLs — "
@@ -491,10 +470,6 @@ class ForPSDScraper:
 
 
     def _extract_card_title(self, card) -> str:
-        """
-        Best-effort title extraction from a listing-page product card.
-        Tries: headings → img alt → short paragraph text.
-        """
         for htag in card.find_all(["h1", "h2", "h3", "h4", "h5"]):
             text = htag.get_text(strip=True)
             if text and len(text) > 3:
@@ -513,7 +488,6 @@ class ForPSDScraper:
 
     # ── Legacy helper (kept for compatibility) ─────────────────────────────
     def get_all_download_urls(self, page_limit: int = 0) -> list[str]:
-        """Return plain list of download URLs (no category info)."""
         return [item["download_url"] for item in self.get_all_items(page_limit)]
 
     # ── Resolve a /download/eyJ… → Google Drive URL ────────────────────────
