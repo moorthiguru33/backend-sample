@@ -476,8 +476,11 @@ class ForPSDScraper:
                 return text
 
         img = card.find("img", alt=True)
-        if img and img.get("alt", "").strip():
-            return img["alt"].strip()
+        alt = img.get("alt", "").strip() if img else ""
+        # Skip generic/useless alt values that forpsd.com uses for thumbnails
+        _GENERIC_ALTS = {"image preview", "preview", "image", "thumbnail", "photo", "img"}
+        if alt and alt.lower() not in _GENERIC_ALTS:
+            return alt
 
         for p in card.find_all("p"):
             text = p.get_text(strip=True)
