@@ -9,21 +9,26 @@ Flow per run
 ────────────
   1. Load jobs.xlsx (JobTracker) + rename_log.xlsx (ExcelTracker).
   2. Determine pending items:
-       a. No items in jobs.xlsx at all → FULL scrape, add all as Pending.
-       b. Pending items exist → use them (no scrape needed).
-       c. All items Completed → INCREMENTAL re-scrape for new URLs.
-  3. Loop over pending items:
-       a. SKIP if jobs.xlsx Status=Completed.       (fastest, 0 API calls)
-       b. SKIP if ALL original files in rename_log.xlsx.
-       c. Resolve category, resolve Drive URL.
-       d. Download archive → extract → rename → upload → mark Completed.
+       A. No items in jobs.xlsx → FULL scrape (all pages), batch-save to xlsx.
+       B. Pending items exist → use them directly (no scrape needed).
+       C. All Completed → re-scrape from page 1 (stop early at known URLs).
+  3. Loop over pending:
+       ① Skip if jobs.xlsx Status=Completed         (fastest, 0 API calls)
+       ② Skip if ALL archive files in rename_log    (0 API calls)
+       ③ Resolve category → download → extract → upload
+       ④ mark_completed in jobs.xlsx (targeted cell update — fast)
 
 Skip logic (fastest-first)
 ───────────────────────────
-  ① jobs.xlsx Status=Completed → skip (0 API calls)
-  ② rename_log.xlsx original-name match → skip (0 API calls)
-  ③ Drive global name cache (preloaded once) → skip
-  ④ Live Drive query per file → skip (handles interrupted runs)
+  ① jobs.xlsx Status=Completed      → skip (0 API calls)
+  ② rename_log.xlsx original-name   → skip (0 API calls)
+  ③ Drive preloaded name cache       → skip (0 API calls)
+  ④ Live Drive query per file        → skip (handles interrupted runs)
+
+File counter continuity
+───────────────────────
+  counter = max(state.json, Drive scan max, rename_log.xlsx max) + 1
+  state.json is now minimal: only stores file_counter + last_run.
 """
 
 import logging
@@ -55,9 +60,10 @@ from job_tracker import JobTracker
 POSTS_PER_PAGE: int = 17
 
 _REPO_ROOT      = Path(STATE_FILE).parent
-EXCEL_LOG_FILE  = str(_REPO_ROOT / "rename_log.xlsx")
-JOBS_EXCEL_FILE = str(_REPO_ROOT / "jobs.xlsx")
+EXCEL_LOG_FILE  = str(_REPO_ROOT / "rename_log.xlsx")   # ExcelTracker: original→renamed
+JOBS_EXCEL_FILE = str(_REPO_ROOT / "jobs.xlsx")          # JobTracker: URL status
 
+# ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s %(message)s",
@@ -69,6 +75,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+
+# ── Secrets check ──────────────────────────────────────────────────────────
 
 def check_secrets() -> bool:
     missing = []
@@ -83,47 +91,83 @@ def check_secrets() -> bool:
     return True
 
 
+# ── Scraping ───────────────────────────────────────────────────────────────
+
 def _full_scrape(scraper: ForPSDScraper, job_tracker: JobTracker) -> int:
-    """Scrape ALL listing pages and add found URLs as Pending to jobs.xlsx."""
-    log.info("🌐 Full scrape starting (page 1 → end)…")
+    """
+    Full scrape from page 1 to end.
+    Adds ALL found URLs as Pending in ONE batch xlsx write.
+    """
+    log.info("🌐 Full scrape: page 1 → end (all pages, no stop condition)…")
     all_items = scraper.get_all_items(
         page_limit=PAGE_LIMIT,
-        stop_at_known_urls=None,
+        stop_at_known_urls=None,   # no skip — we want everything
         start_page=1,
-        max_new_items=0,
+        max_new_items=0,           # unlimited
     )
     if not all_items:
-        log.warning("Full scrape returned 0 items — site may be unreachable.")
+        log.warning("Full scrape returned 0 items — check FORPSD_COOKIE and site.")
         return 0
-    added = job_tracker.add_pending_items(all_items)
-    log.info(f"Full scrape done: found {len(all_items)} total, +{added} new Pending.")
+
+    log.info(f"Full scrape complete: {len(all_items)} items found. Saving to jobs.xlsx…")
+    added = job_tracker.add_pending_items(all_items)   # ← single batch write
+    log.info(f"📋 jobs.xlsx: +{added} new Pending (total: {job_tracker.total()})")
     return added
 
 
-def _incremental_scrape(scraper: ForPSDScraper, job_tracker: JobTracker,
-                         item_limit: int) -> int:
-    """Incremental scrape from last-known page; stops when hitting known URLs."""
+def _rescrape_for_new(scraper: ForPSDScraper, job_tracker: JobTracker,
+                      item_limit: int) -> int:
+    """
+    Re-scrape from PAGE 1 (newest items first) using stop_at_known_urls
+    for early termination. Used ONLY when all known items are Completed.
+    """
     known_urls = job_tracker.all_known_urls()
-    done_count = job_tracker.completed_count()
-    start_page = (done_count // POSTS_PER_PAGE) + 1
-    needed     = (item_limit - len(job_tracker.get_pending())) if item_limit > 0 else 0
-
     log.info(
-        f"🌐 Incremental scrape: done={done_count} → start_page={start_page} | "
-        f"need={needed if item_limit > 0 else 'unlimited'} new items"
+        f"🌐 Re-scrape from page 1 (looking for items not in {len(known_urls)} known URLs)…"
     )
     new_items = scraper.get_all_items(
         page_limit=PAGE_LIMIT,
-        stop_at_known_urls=known_urls if known_urls else None,
+        stop_at_known_urls=known_urls,   # stops when a full page is all-known
+        start_page=1,                    # ALWAYS page 1 for new items
+        max_new_items=item_limit if item_limit > 0 else 0,
+    )
+    if not new_items:
+        return 0
+    added = job_tracker.add_pending_items(new_items)
+    log.info(f"Re-scrape done: found {len(new_items)}, +{added} new Pending.")
+    return added
+
+
+def _topup_scrape(scraper: ForPSDScraper, job_tracker: JobTracker,
+                  item_limit: int) -> int:
+    """
+    Targeted scrape to top up pending count when ITEM_LIMIT is set
+    but fewer than ITEM_LIMIT items are pending.
+    Starts from the page where new items would appear next.
+    """
+    known_urls = job_tracker.all_known_urls()
+    done_count = job_tracker.completed_count()
+    # New unprocessed items are on pages AFTER all done items
+    start_page = max(1, (done_count // POSTS_PER_PAGE))
+    needed     = item_limit - len(job_tracker.get_pending())
+
+    log.info(
+        f"🌐 Top-up scrape: start_page={start_page}, need {needed} more items…"
+    )
+    new_items = scraper.get_all_items(
+        page_limit=PAGE_LIMIT,
+        stop_at_known_urls=known_urls,
         start_page=start_page,
         max_new_items=needed,
     )
     if not new_items:
         return 0
     added = job_tracker.add_pending_items(new_items)
-    log.info(f"Incremental scrape done: +{added} new Pending.")
+    log.info(f"Top-up done: +{added} new Pending.")
     return added
 
+
+# ── Archive helpers ────────────────────────────────────────────────────────
 
 def _list_archive_originals(archive_path: Path) -> list[str]:
     TARGET_EXT = {".psd", ".tif", ".tiff"}
@@ -149,9 +193,11 @@ def _list_archive_originals(archive_path: Path) -> list[str]:
                     if p.suffix.lower() in TARGET_EXT and not entry.is_directory:
                         names.append(p.name)
     except Exception as exc:
-        log.warning(f"  Could not list archive originals for {archive_path.name}: {exc}")
+        log.warning(f"  Could not list archive: {archive_path.name}: {exc}")
     return names
 
+
+# ── Main ───────────────────────────────────────────────────────────────────
 
 def main() -> None:
     if not check_secrets():
@@ -161,9 +207,9 @@ def main() -> None:
     deadline   = start_time + timedelta(minutes=RUN_MINUTES)
 
     log.info("=" * 70)
-    log.info(f"Run started at {start_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    log.info(f"Will work until {deadline.strftime('%H:%M:%S UTC')}  ({RUN_MINUTES} min)")
-    log.info(f"Item limit this run: {ITEM_LIMIT if ITEM_LIMIT > 0 else 'unlimited'}")
+    log.info(f"Run started:    {start_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    log.info(f"Deadline:       {deadline.strftime('%H:%M:%S UTC')}  ({RUN_MINUTES} min)")
+    log.info(f"Item limit:     {ITEM_LIMIT if ITEM_LIMIT > 0 else 'unlimited'}")
     log.info("=" * 70)
 
     work_root = Path(WORK_DIR)
@@ -173,58 +219,62 @@ def main() -> None:
     uploader = DriveUploader(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN)
 
     # ── Load trackers ──────────────────────────────────────────────────────
-    job_tracker    = JobTracker(JOBS_EXCEL_FILE)         # PRIMARY: URL→status
-    rename_tracker = ExcelTracker(EXCEL_LOG_FILE)        # SECONDARY: file naming
+    job_tracker    = JobTracker(JOBS_EXCEL_FILE)     # PRIMARY: URL → status
+    rename_tracker = ExcelTracker(EXCEL_LOG_FILE)    # file naming log
+    state          = StateManager(STATE_FILE)         # only: file_counter + last_run
+
     log.info(f"📋 Job tracker:    {job_tracker.stats()}")
     log.info(f"📊 Rename tracker: {rename_tracker.stats()}")
 
-    state = StateManager(STATE_FILE)   # only used for file_counter
-
-    # Preload all existing Drive filenames once (cross-subfolder duplicate guard)
+    # Preload all Drive filenames once (cross-subfolder duplicate guard)
     uploader.preload_existing_names(GDRIVE_PSD_FOLDER)
 
-    # ── PHASE 1: Ensure pending items exist in jobs.xlsx ──────────────────
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # PHASE 1: Ensure pending items exist in jobs.xlsx
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     pending = job_tracker.get_pending()
 
     if job_tracker.total() == 0:
-        # Brand new — full scrape
-        log.info("🆕 First run — performing full scrape to populate jobs.xlsx…")
+        # ── Scenario A: Brand new — full scrape ───────────────────────────
+        log.info("🆕 First run — full scrape to populate jobs.xlsx…")
         found = _full_scrape(scraper, job_tracker)
         if found == 0:
-            log.error("No items found on site. Check FORPSD_COOKIE.")
+            log.error("No items found. Check FORPSD_COOKIE and site availability.")
             sys.exit(1)
         pending = job_tracker.get_pending()
 
     elif not pending:
-        # All done — check for new items on site
+        # ── Scenario B: All Completed → check for new items on site ──────
         log.info(
-            f"✅ All {job_tracker.completed_count()} known items are Completed. "
-            "Checking site for new uploads…"
+            f"✅ All {job_tracker.completed_count()} items Completed. "
+            "Re-scraping from page 1 for new uploads…"
         )
-        found = _incremental_scrape(scraper, job_tracker, ITEM_LIMIT)
+        found = _rescrape_for_new(scraper, job_tracker, ITEM_LIMIT)
         if found == 0:
-            log.info("No new items found on site. Everything is done! 🎉")
+            log.info("No new items found on site — all done! 🎉")
             Path(DONE_FILE).touch()
             return
         pending = job_tracker.get_pending()
 
     elif ITEM_LIMIT > 0 and len(pending) < ITEM_LIMIT:
-        # Have pending but fewer than requested — top up
+        # ── Scenario C: Need more pending items to hit ITEM_LIMIT ─────────
         log.info(
             f"Only {len(pending)} pending but ITEM_LIMIT={ITEM_LIMIT}. "
-            "Scraping more items…"
+            "Fetching more items…"
         )
-        _incremental_scrape(scraper, job_tracker, ITEM_LIMIT)
+        _topup_scrape(scraper, job_tracker, ITEM_LIMIT)
         pending = job_tracker.get_pending()
 
-    log.info(f"📋 After scrape: {job_tracker.stats()}")
+    log.info(f"📋 Ready to process: {job_tracker.stats()}")
 
     if not pending:
         log.info("Nothing pending — exiting.")
         Path(DONE_FILE).touch()
         return
 
-    # ── Global file counter ────────────────────────────────────────────────
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # File counter — synced from ALL sources so collisions are impossible
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     file_counter: int = max(
         state.get("file_counter", 1),
         uploader.max_counter + 1,
@@ -233,37 +283,40 @@ def main() -> None:
     state.set("file_counter", file_counter)
     state.save()
     log.info(
-        f"File counter: {file_counter} "
-        f"(Drive max: {uploader.max_counter:04d}, "
-        f"Rename log max: {rename_tracker.max_counter:04d}) "
-        f"→ next tamilpsd-{file_counter:04d}"
+        f"Counter starts: tamilpsd-{file_counter:04d}  "
+        f"(Drive max={uploader.max_counter:04d}, "
+        f"Rename log max={rename_tracker.max_counter:04d})"
     )
 
-    # ── PHASE 2: Process pending items ────────────────────────────────────
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # PHASE 2: Process pending items
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     processed_this_run = 0
     errors_this_run    = 0
 
     for item in pending:
         download_url = item.get("download_url", "")
         detail_url   = item.get("detail_url",   "")
+        card_title   = item.get("card_title",   "")
         category     = item.get("category",     "")
 
-        # Time limit
+        # ── Time limit ────────────────────────────────────────────────────
         if datetime.utcnow() >= deadline:
             log.info(
-                f"⏰ Time limit. Processed={processed_this_run}, "
+                f"⏰ Time limit reached. "
+                f"Processed={processed_this_run}, "
                 f"Remaining={len(job_tracker.get_pending())}"
             )
             break
 
-        # Item limit
+        # ── Item limit ────────────────────────────────────────────────────
         if ITEM_LIMIT > 0 and processed_this_run >= ITEM_LIMIT:
             log.info(f"🔢 Item limit ({ITEM_LIMIT}) reached.")
             break
 
-        # ── SKIP CHECK 1: Already Completed in jobs.xlsx ──────────────────
+        # ── SKIP ① — Already Completed in jobs.xlsx ──────────────────────
         if job_tracker.is_completed(download_url):
-            log.info(f"  ⏭  Already Completed → skipping: {download_url[:60]}")
+            log.info(f"  ⏭  Already Completed (jobs.xlsx) → skip: {download_url[:60]}")
             processed_this_run += 1
             continue
 
@@ -271,17 +324,17 @@ def main() -> None:
         item_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            log.info(f"\n{'─'*60}")
-            log.info(f"  Processing: {download_url}")
+            log.info(f"\n{'─'*65}")
+            log.info(f"  [{processed_this_run+1}] {download_url}")
 
             # ── Resolve category ──────────────────────────────────────────
             if not category:
-                card_title = item.get("card_title", "")
-                if detail_url or card_title:
+                if card_title or detail_url:
                     category = scraper.get_category(detail_url, hint_title=card_title)
                 else:
                     category = "uncategorized"
-                    log.warning("  No detail URL — using 'uncategorized'")
+                    log.warning("  No detail URL or card_title — using 'uncategorized'")
+                # Cache in memory (saved to xlsx on mark_completed)
                 job_tracker.update_category(download_url, category)
 
             log.info(f"  Category: [{category}]")
@@ -289,7 +342,7 @@ def main() -> None:
             # ── Resolve Google Drive URL ──────────────────────────────────
             drive_url = scraper.resolve_drive_url(download_url)
             if not drive_url:
-                log.warning("  No Drive URL — will retry next run")
+                log.warning("  Could not resolve Drive URL — marking Error (retry next run)")
                 job_tracker.mark_error(download_url)
                 errors_this_run += 1
                 continue
@@ -310,60 +363,60 @@ def main() -> None:
                 errors_this_run += 1
                 continue
 
-            # ── List original filenames from archive ──────────────────────
+            # ── List original filenames ───────────────────────────────────
             original_names = _list_archive_originals(archive)
-            log.info(f"  Archive: {len(original_names)} PSD/TIF file(s)")
+            log.info(f"  Archive: {len(original_names)} PSD/TIF file(s) inside")
 
-            # ── SKIP CHECK 2: ALL files already in rename_log.xlsx ────────
+            # ── SKIP ② — ALL files already in rename_log.xlsx ────────────
             if original_names and all(
                 rename_tracker.is_original_done(n) for n in original_names
             ):
                 log.info(
                     f"  ⏭  All {len(original_names)} file(s) already in rename_log.xlsx "
-                    f"— marking Completed."
+                    f"— marking Completed, no upload needed."
                 )
                 job_tracker.mark_completed(download_url)
                 processed_this_run += 1
                 continue
 
-            # ── Extract and rename ────────────────────────────────────────
+            # ── Extract + rename ──────────────────────────────────────────
             result = process_archive(
                 archive_path=archive,
                 work_dir=item_dir / "process",
                 start_index=file_counter,
             )
             if not result:
-                log.error(f"  Processing failed for {archive.name}")
+                log.error(f"  process_archive failed for {archive.name}")
                 job_tracker.mark_error(download_url)
                 errors_this_run += 1
                 continue
 
             renamed_files, next_index = result
 
-            # Build original→renamed mapping
+            # Map: renamed_path → original_name
             orig_map: dict[Path, str] = {}
             for idx, renamed_path in enumerate(renamed_files):
                 orig_name = original_names[idx] if idx < len(original_names) else renamed_path.name
                 orig_map[renamed_path] = orig_name
 
-            # ── Upload to Drive ───────────────────────────────────────────
+            # ── Upload to Drive category subfolder ────────────────────────
             uploaded_count = 0
             for renamed_path, orig_name in orig_map.items():
                 if renamed_path.exists():
-                    log.info(f"  Uploading: {renamed_path.name} → [{category}/]")
-                    upload_result = uploader.upload_to_category(
+                    log.info(f"  ↑ Uploading: {renamed_path.name} → [{category}/]")
+                    result_info = uploader.upload_to_category(
                         file_path=renamed_path,
                         parent_folder_id=GDRIVE_PSD_FOLDER,
                         category=category,
                         excel_tracker=rename_tracker,
                         original_name=orig_name,
                     )
-                    if not upload_result.get("skipped"):
+                    if not result_info.get("skipped"):
                         uploaded_count += 1
                 else:
-                    log.warning(f"  File missing: {renamed_path}")
+                    log.warning(f"  File missing after rename: {renamed_path}")
 
-            # ── Mark Completed ────────────────────────────────────────────
+            # ── Persist counter + mark Completed ──────────────────────────
             file_counter = next_index
             state.set("file_counter", file_counter)
             state.save()
@@ -374,12 +427,12 @@ def main() -> None:
             log.info(
                 f"  ✅ Done ({processed_this_run} this run) "
                 f"[{category}] uploaded={uploaded_count} "
-                f"next=tamilpsd-{file_counter:04d} "
-                f"| {job_tracker.stats()}"
+                f"next=tamilpsd-{file_counter:04d}"
             )
+            log.info(f"  📋 {job_tracker.stats()}")
 
         except Exception as exc:
-            log.error(f"  Unhandled error: {exc}", exc_info=True)
+            log.error(f"  ❌ Unhandled error: {exc}", exc_info=True)
             try:
                 job_tracker.mark_error(download_url)
             except Exception:
@@ -394,17 +447,17 @@ def main() -> None:
     state.save()
 
     remaining = len(job_tracker.get_pending())
+    log.info(f"\n{'='*70}")
     log.info(
-        f"\n{'='*70}\n"
         f"Run finished: Processed={processed_this_run} | "
         f"Errors={errors_this_run} | Remaining={remaining} | "
         f"Next=tamilpsd-{file_counter:04d}"
     )
-    log.info(f"📋 Job tracker:    {job_tracker.stats()}")
-    log.info(f"📊 Rename tracker: {rename_tracker.stats()}")
+    log.info(f"📋 Job tracker final:    {job_tracker.stats()}")
+    log.info(f"📊 Rename tracker final: {rename_tracker.stats()}")
 
     if remaining == 0:
-        log.info("🎉 All items Completed! Setting ALL_DONE.")
+        log.info("🎉 All items Completed! Touching ALL_DONE.")
         Path(DONE_FILE).touch()
     else:
         log.info("📌 Items still pending — next run continues from here.")
