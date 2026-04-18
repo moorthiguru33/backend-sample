@@ -58,7 +58,7 @@ CDN_BASE = f"https://cdn.jsdelivr.net/gh/{BACKEND_REPO}@main/{PREVIEW_DIR}"
 
 # ── ModelScope ────────────────────────────────────────────────────────────────
 MODELSCOPE_API = "https://api-inference.modelscope.ai/v1/chat/completions"
-VISION_MODEL   = "Qwen/Qwen2.5-VL-72B-Instruct"
+VISION_MODEL   = "Qwen/Qwen2.5-VL-32B-Instruct"
 
 # ── Processing limits ─────────────────────────────────────────────────────────
 _env_count  = int(os.environ.get("FILE_COUNT", "0"))
