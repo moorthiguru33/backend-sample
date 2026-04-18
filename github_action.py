@@ -222,11 +222,93 @@ def gdrive_upload(file_bytes: bytes, filename: str, folder_id: str,
     return url
 
 
-def scan_gdrive_structure(root_id: str) -> list:
+def gdrive_find_or_create_folder(folder_name: str, parent_folder_id: str) -> str:
+    """
+    Find an existing subfolder by name inside parent_folder_id, or create it.
+    Returns the folder_id, or "" on failure.
+    """
+    safe = folder_name.replace("'", "\\'")
+    resp = requests.get(
+        "https://www.googleapis.com/drive/v3/files",
+        params={
+            "q": (
+                f"name='{safe}' and '{parent_folder_id}' in parents "
+                f"and mimeType='{FOLDER_MIME}' and trashed=false"
+            ),
+            "fields":   "files(id,name)",
+            "pageSize": "1",
+        },
+        headers=gdrive_headers(), timeout=20
+    )
+    files = resp.json().get("files", [])
+    if files:
+        return files[0]["id"]
+
+    # Create the folder
+    resp = requests.post(
+        "https://www.googleapis.com/drive/v3/files",
+        json={
+            "name":     folder_name,
+            "mimeType": FOLDER_MIME,
+            "parents":  [parent_folder_id],
+        },
+        headers=gdrive_headers(), timeout=20
+    )
+    data = resp.json()
+    folder_id = data.get("id", "")
+    if folder_id:
+        log(f"    📁 Created 'final' folder inside parent {parent_folder_id[:12]}…")
+    else:
+        log(f"    ❌ Failed to create folder '{folder_name}': {data}")
+    return folder_id
+
+
+def gdrive_move_to_final(file_id: str, category_folder_id: str) -> bool:
+    """
+    Move a source PSD file to the 'final' subfolder within its category folder.
+    Creates the 'final' subfolder if it doesn't exist.
+    Returns True on success.
+    """
+    final_folder_id = gdrive_find_or_create_folder("final", category_folder_id)
+    if not final_folder_id:
+        return False
+
+    # Get the file's current parent list
+    resp = requests.get(
+        f"https://www.googleapis.com/drive/v3/files/{file_id}",
+        params={"fields": "parents"},
+        headers=gdrive_headers(), timeout=20
+    )
+    if resp.status_code != 200:
+        log(f"    ❌ gdrive_move_to_final: could not fetch parents (HTTP {resp.status_code})")
+        return False
+    current_parents = ",".join(resp.json().get("parents", []))
+
+    # Patch the file to move it: add new parent, remove current
+    resp = requests.patch(
+        f"https://www.googleapis.com/drive/v3/files/{file_id}",
+        params={
+            "addParents":    final_folder_id,
+            "removeParents": current_parents,
+            "fields":        "id,parents",
+        },
+        headers={**gdrive_headers(), "Content-Type": "application/json"},
+        json={},
+        timeout=30
+    )
+    if resp.status_code == 200:
+        return True
+    log(f"    ❌ gdrive_move_to_final failed (HTTP {resp.status_code}): {resp.text[:200]}")
+    return False
+
+
+
     """
     Walk the PSD GDrive folder. Returns list of:
-      (file_id, filename, category_name)
+      (file_id, filename, category_name, category_folder_id)
     where category_name = name of the immediate subfolder (or "" for root files).
+    category_folder_id is the folder containing this file (needed for move-to-final).
+    Skips files already inside a 'final' subfolder (already processed).
     """
     result = []
     items = gdrive_list_folder(root_id)
@@ -235,17 +317,20 @@ def scan_gdrive_structure(root_id: str) -> list:
         fid  = item["id"]
         mime = item["mimeType"]
         if mime == FOLDER_MIME:
-            # Category subfolder → list its files
+            # Category subfolder → list its files (skip 'final' subfolder)
+            if name.lower() == "final":
+                continue
             sub_items = gdrive_list_folder(fid)
             for sub in sub_items:
-                if sub["mimeType"] != FOLDER_MIME:
-                    ext = Path(sub["name"]).suffix.lower()
-                    if ext in IMAGE_EXTS:
-                        result.append((sub["id"], sub["name"], name))
+                if sub["mimeType"] == FOLDER_MIME:
+                    continue  # skip nested folders (including 'final')
+                ext = Path(sub["name"]).suffix.lower()
+                if ext in IMAGE_EXTS:
+                    result.append((sub["id"], sub["name"], name, fid))
         else:
             ext = Path(name).suffix.lower()
             if ext in IMAGE_EXTS:
-                result.append((fid, name, ""))
+                result.append((fid, name, "", root_id))
     return result
 
 
@@ -448,15 +533,36 @@ def fetch_designs_xlsx(token: str):
 
     # ── Decode and validate the base64 payload before passing to pandas ──────
     raw_b64 = data.get("content", "")
-    if not raw_b64:
-        log("  ⚠️  designs.xlsx API response had no content field — starting fresh")
-        return pd.DataFrame(columns=XLSX_HEADERS), None
+    raw = None
 
-    try:
-        raw = base64.b64decode(raw_b64.replace("\n", ""))
-    except Exception as b64_err:
-        log(f"  ⚠️  designs.xlsx base64 decode failed: {b64_err} — starting fresh")
-        return pd.DataFrame(columns=XLSX_HEADERS), None
+    if not raw_b64:
+        # File is likely > 1 MB — GitHub returns download_url instead of content
+        download_url_direct = data.get("download_url", "")
+        if download_url_direct:
+            log("  📥 designs.xlsx is large (>1MB) — fetching via direct download URL...")
+            try:
+                dl_resp = requests.get(
+                    download_url_direct, headers=_gh_headers(token), timeout=120
+                )
+                if dl_resp.status_code == 200:
+                    raw = dl_resp.content
+                    log(f"  ✅ Direct download OK: {len(raw)} bytes")
+                else:
+                    log(f"  ⚠️  Direct download failed: HTTP {dl_resp.status_code} — starting fresh")
+                    return pd.DataFrame(columns=XLSX_HEADERS), None
+            except Exception as dl_err:
+                log(f"  ⚠️  Direct download error: {dl_err} — starting fresh")
+                return pd.DataFrame(columns=XLSX_HEADERS), None
+        else:
+            log("  ⚠️  designs.xlsx API response had no content field — starting fresh")
+            return pd.DataFrame(columns=XLSX_HEADERS), None
+
+    if raw is None:
+        try:
+            raw = base64.b64decode(raw_b64.replace("\n", ""))
+        except Exception as b64_err:
+            log(f"  ⚠️  designs.xlsx base64 decode failed: {b64_err} — starting fresh")
+            return pd.DataFrame(columns=XLSX_HEADERS), None
 
     # ── Guard: make sure the decoded bytes look like a ZIP/xlsx before parsing
     if not raw[:4] == b"PK\x03\x04":
@@ -824,7 +930,7 @@ def truncate_description(desc: str, max_lines: int = 100) -> str:
 # ║         MODELSCOPE AI CALL                  ║
 # ╚══════════════════════════════════════════════╝
 
-def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 3) -> str:
+def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 5) -> str:
     """
     Call ModelScope Qwen2.5-VL with an image and the SEO prompt.
     Returns the raw text response.
@@ -856,14 +962,51 @@ def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 3) -> st
             resp = requests.post(
                 MODELSCOPE_API, headers=headers, json=payload, timeout=120
             )
+
+            # ── HTTP 429 rate limit ───────────────────────────────────────
+            if resp.status_code == 429:
+                wait = 60 * (attempt + 1)
+                log(f"    ⚠  ModelScope HTTP 429 rate-limit (attempt {attempt+1}/{retries}) — waiting {wait}s")
+                time.sleep(wait)
+                continue
+
+            # ── HTTP 502/503/504 transient server errors ──────────────────
+            if resp.status_code in (502, 503, 504):
+                wait = 30 * (attempt + 1)
+                log(f"    ⚠  ModelScope HTTP {resp.status_code} transient error (attempt {attempt+1}/{retries}) — waiting {wait}s")
+                time.sleep(wait)
+                continue
+
             data = resp.json()
+
+            # ── Successful response ───────────────────────────────────────
             if "choices" in data:
                 return data["choices"][0]["message"]["content"].strip()
-            log(f"    ⚠  ModelScope no choices (attempt {attempt+1}): {str(data)[:300]}")
+
+            # ── API-level error in response body ──────────────────────────
+            err_obj  = data.get("error", {})
+            err_code = str(err_obj.get("code", "")).lower() if isinstance(err_obj, dict) else ""
+            err_msg  = str(err_obj.get("message", data.get("message", str(data)[:300]))).lower()
+
+            if "quota" in err_msg or "quota" in err_code:
+                wait = 90 * (attempt + 1)
+                log(f"    ⚠  ModelScope quota error (attempt {attempt+1}/{retries}) — waiting {wait}s: {err_msg[:200]}")
+                time.sleep(wait)
+                continue
+
+            if "rate" in err_msg or "throttl" in err_msg:
+                wait = 60 * (attempt + 1)
+                log(f"    ⚠  ModelScope rate-limit error (attempt {attempt+1}/{retries}) — waiting {wait}s")
+                time.sleep(wait)
+                continue
+
+            log(f"    ⚠  ModelScope no choices (attempt {attempt+1}/{retries}): {str(data)[:300]}")
+
         except Exception as e:
-            log(f"    ⚠  ModelScope error (attempt {attempt+1}): {e}")
+            log(f"    ⚠  ModelScope request error (attempt {attempt+1}/{retries}): {e}")
+
         if attempt < retries - 1:
-            time.sleep(15 * (attempt + 1))
+            time.sleep(20 * (attempt + 1))
 
     return ""
 
@@ -911,7 +1054,7 @@ def main():
     log(f"  📄 Total files in GDrive: {len(all_files)}")
 
     new_files = [
-        (fid, fname, cat) for fid, fname, cat in all_files
+        (fid, fname, cat, cat_fid) for fid, fname, cat, cat_fid in all_files
         if Path(fname).stem not in existing_ids
     ]
     log(f"  🆕 New files (not yet in xlsx): {len(new_files)}")
@@ -928,7 +1071,7 @@ def main():
     new_rows = []
     errors   = 0
 
-    for idx, (file_id, filename, category) in enumerate(to_process):
+    for idx, (file_id, filename, category, category_folder_id) in enumerate(to_process):
         stem = Path(filename).stem
         ext  = Path(filename).suffix.lower()
         log(f"\n  [{idx+1}/{len(to_process)}]  {filename}  📁[{category or 'root'}]")
@@ -1004,6 +1147,17 @@ def main():
             dl_url = gdrive_upload(zip_bytes, zip_filename, GDRIVE_UPLOAD_FOLDER)
             if not dl_url:
                 log(f"    ⚠  ZIP upload failed — dl_url will be empty")
+
+            # ── 3f2. Move source PSD to 'final' subfolder ────────────────────
+            if dl_url and category_folder_id:
+                log(f"    📁 Moving source file to final/ subfolder…")
+                moved = gdrive_move_to_final(file_id, category_folder_id)
+                if moved:
+                    log(f"    ✅ Source moved to final/")
+                else:
+                    log(f"    ⚠  Could not move source to final/ — continuing anyway")
+            elif not category_folder_id:
+                log(f"    ⚠  No category_folder_id — skipping move to final/")
 
             # ── 3g. ModelScope vision AI ─────────────────────────────────────
             log(f"    🤖 Running AI vision analysis (ModelScope Qwen2.5-VL)…")

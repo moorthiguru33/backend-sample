@@ -209,23 +209,38 @@ def main() -> None:
     # ── Preload all existing Drive filenames (cross-subfolder duplicate guard)
     uploader.preload_existing_names(GDRIVE_PSD_FOLDER)
 
-    # ── Phase 1: Ensure we have pending items ─────────────────────────────
+    # ── Phase 1: Ensure we have enough pending items ──────────────────────
     pending = state.pending_items()
 
-    if not pending:
+    # Need to scrape when:
+    #   - ITEM_LIMIT=0 (unlimited) and no pending items at all
+    #   - ITEM_LIMIT>0 and pending count is below what the user requested
+    need_scrape = (ITEM_LIMIT == 0 and not pending) or \
+                  (ITEM_LIMIT > 0 and len(pending) < ITEM_LIMIT)
+
+    if need_scrape:
         if not state.get("all_items"):
             log.info("First run — smart scrape for initial batch ...")
-        else:
+        elif not pending:
             log.info(
                 f"All {len(state.get('all_items', []))} known items are done. "
                 "Smart scrape to check for more on site ..."
             )
+        else:
+            log.info(
+                f"Only {len(pending)} pending items but ITEM_LIMIT={ITEM_LIMIT}. "
+                "Smart scrape to fetch more items ..."
+            )
 
-        found_new = _smart_scrape(scraper, state, ITEM_LIMIT)
+        # How many NEW items to scrape: the deficit between what we have and what we need
+        needed = (ITEM_LIMIT - len(pending)) if ITEM_LIMIT > 0 else ITEM_LIMIT
+        found_new = _smart_scrape(scraper, state, needed)
         if found_new == 0:
-            log.info("No new items found on site. Everything is done!")
-            Path(DONE_FILE).touch()
-            return
+            if not pending:
+                log.info("No new items found on site. Everything is done!")
+                Path(DONE_FILE).touch()
+                return
+            log.info(f"No new items found on site but {len(pending)} pending items remain — continuing.")
 
         pending = state.pending_items()
     log.info(f"State: {state.summary()}")
