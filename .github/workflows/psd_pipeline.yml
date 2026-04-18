@@ -80,7 +80,11 @@ jobs:
             openpyxl \
             requests
 
-      # ── 5. Run the pipeline ─────────────────────────────────────────────────
+      # ── 5. Pull latest state (avoid push conflicts) ──────────────────────────
+      - name: Pull latest state
+        run: git pull origin main || true
+
+      # ── 6. Run the pipeline ─────────────────────────────────────────────────
       - name: Run Tamil PSD Pipeline
         env:
           GOOGLE_CLIENT_ID:     ${{ secrets.GOOGLE_CLIENT_ID }}
@@ -94,7 +98,21 @@ jobs:
           FILE_COUNT:           ${{ github.event.inputs.file_count || '0' }}
         run: python github_action.py
 
-      # ── 6. Summary ──────────────────────────────────────────────────────────
+      # ── 7. Commit and push WebP preview images ───────────────────────────────
+      # FIX: github_action.py now saves WebP files locally to preview_image/.
+      # This step commits them to the repo so they are reliably persisted,
+      # even if the per-file GitHub API upload (secondary) failed or was rate-limited.
+      - name: Commit preview images to repo
+        if: always()
+        run: |
+          git config user.name  "PSD-Bot"
+          git config user.email "psdbot@automation.local"
+          git add preview_image/ 2>/dev/null || true
+          git diff --cached --quiet || \
+            git commit -m "ci: add preview images $(date '+%Y-%m-%d %H:%M UTC')"
+          git push origin main || true
+
+      # ── 8. Summary ──────────────────────────────────────────────────────────
       - name: Print summary
         if: always()
         run: |
@@ -103,3 +121,5 @@ jobs:
           echo "- Preview images: \`backend-sample/preview_image/\`" >> $GITHUB_STEP_SUMMARY
           echo "- CDN base: \`https://cdn.jsdelivr.net/gh/moorthiguru33/backend-sample@main/preview_image/\`" >> $GITHUB_STEP_SUMMARY
           echo "- designs.xlsx: \`moorthiguru33/Gurumoorthi/designs.xlsx\`" >> $GITHUB_STEP_SUMMARY
+          WEBP_COUNT=$(find preview_image/ -name "*.webp" 2>/dev/null | wc -l)
+          echo "- Total WebP files in repo: $WEBP_COUNT" >> $GITHUB_STEP_SUMMARY
