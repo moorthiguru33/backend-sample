@@ -219,6 +219,9 @@ class ForPSDScraper:
 
     def __init__(self, cookie_string: str):
         self._session = self._build_session(cookie_string)
+        # Set False the moment any ConnectTimeout/ConnectionError occurs.
+        # Callers use this to skip further requests to the same down site.
+        self.site_reachable: bool = True
 
     # ── Session setup ──────────────────────────────────────────────────────
     def _build_session(self, cookie_string: str) -> requests.Session:
@@ -236,7 +239,15 @@ class ForPSDScraper:
         try:
             r = self._session.get(url, timeout=30, allow_redirects=True)
             r.raise_for_status()
+            self.site_reachable = True   # confirm reachable on any success
             return BeautifulSoup(r.content, "html.parser")
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as exc:
+            # Connection-level failure (timeout, refused, DNS) → site is down.
+            # Flag it so callers can skip any further requests immediately.
+            self.site_reachable = False
+            log.error(f"GET failed {url}: {exc}")
+            return None
         except Exception as exc:
             log.error(f"GET failed {url}: {exc}")
             return None
@@ -292,13 +303,21 @@ class ForPSDScraper:
 
     # ── Public: resolve category from product detail page ─────────────────
     def get_category(self, product_detail_url: str, hint_title: str = "") -> str:
-        if hint_title:
+        # Only use hint_title if it is a real product name, not a generic
+        # placeholder like "Image Preview" that forpsd.com puts on card headings.
+        if hint_title and hint_title.lower() not in self._GENERIC_CARD_TEXT:
             category = self._detect_category_from_title(hint_title)
             if category != "uncategorized":
                 log.info(f"  Category (from card title): [{category}]  title={hint_title!r}")
                 return category
 
         if not product_detail_url:
+            return "uncategorized"
+
+        # Don't attempt a network request when the site is already known-down.
+        # This avoids burning another 30 s on a doomed connection.
+        if not self.site_reachable:
+            log.info("  Category: [uncategorized] (forpsd.com unreachable — skipping detail fetch)")
             return "uncategorized"
 
         soup = self._get(product_detail_url)
@@ -505,6 +524,7 @@ class ForPSDScraper:
         """
         Follow the /download/eyJ… link.
         Returns the final Google Drive URL, or None on failure.
+        Sets self.site_reachable=False on connection-level errors.
         """
         try:
             r = self._session.get(
@@ -513,11 +533,13 @@ class ForPSDScraper:
                 allow_redirects=True,
             )
             if "drive.google.com" in r.url:
+                self.site_reachable = True
                 return r.url
 
             soup = BeautifulSoup(r.content, "html.parser")
             drive_tag = soup.find("a", href=re.compile(r"drive\.google\.com"))
             if drive_tag:
+                self.site_reachable = True
                 return drive_tag["href"]
 
             meta = soup.find("meta", attrs={"http-equiv": re.compile("refresh", re.I)})
@@ -525,11 +547,18 @@ class ForPSDScraper:
                 content = meta.get("content", "")
                 m = re.search(r"url=(https://drive\.google\.com[^\s\"']+)", content, re.I)
                 if m:
+                    self.site_reachable = True
                     return m.group(1)
 
             log.warning(f"Could not resolve Drive URL from {download_url} (final: {r.url})")
             return None
 
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as exc:
+            # Connection-level failure — site is down, flag it immediately.
+            self.site_reachable = False
+            log.error(f"resolve_drive_url error for {download_url}: {exc}")
+            return None
         except Exception as exc:
             log.error(f"resolve_drive_url error for {download_url}: {exc}")
             return None

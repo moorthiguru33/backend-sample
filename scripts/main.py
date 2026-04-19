@@ -195,7 +195,7 @@ def _list_archive_originals(archive_path: Path) -> list[str]:
     return names
 
 
-# ── FIX: Resolve Drive URL with automatic fresh-URL fallback ──────────────
+# ── Resolve Drive URL with site-awareness and fresh-URL fallback ───────────
 
 def _resolve_drive_url_with_retry(
     scraper: ForPSDScraper,
@@ -206,17 +206,25 @@ def _resolve_drive_url_with_retry(
     Resolve the forpsd /download/ URL to a Google Drive URL.
 
     Step 1: Try the stored download_url directly.
-    Step 2: If that fails and we have a detail_url, re-scrape the product
-            page to get a fresh /download/ URL (the JWT token may have
-            expired since it was scraped), then try resolving again.
-    Returns the Google Drive URL, or None if both attempts fail.
+    Step 2: ONLY if step 1 failed for a non-network reason (e.g. JWT expired)
+            AND scraper.site_reachable is still True — re-scrape the detail
+            page for a fresh URL and retry once.
+
+    Fast-fail: if step 1 sets scraper.site_reachable=False (ConnectTimeout /
+    ConnectionError), we skip step 2 immediately — no point burning another
+    30 s on a request to an already-unreachable site.
     """
     # ── Attempt 1: stored URL ─────────────────────────────────────────────
     drive_url = scraper.resolve_drive_url(download_url)
     if drive_url:
         return drive_url
 
-    # ── Attempt 2: fresh URL from detail page ─────────────────────────────
+    # ── Fast-fail when site is down ───────────────────────────────────────
+    if not scraper.site_reachable:
+        log.warning("  forpsd.com unreachable (connection error) — skipping re-scrape")
+        return None
+
+    # ── Attempt 2: JWT may have expired — get a fresh download URL ────────
     if not detail_url:
         log.warning("  resolve_drive_url failed and no detail_url available — cannot retry")
         return None
@@ -228,14 +236,13 @@ def _resolve_drive_url_with_retry(
         return None
 
     if fresh_dl_url == download_url:
-        # Same URL — site hasn't changed, permanent failure
         log.warning("  Fresh URL is identical to stored URL — permanent failure")
         return None
 
     log.info(f"  Retrying with fresh URL: {fresh_dl_url}")
     drive_url = scraper.resolve_drive_url(fresh_dl_url)
     if drive_url:
-        log.info(f"  ✅ Fresh URL resolved successfully")
+        log.info("  ✅ Fresh URL resolved successfully")
     else:
         log.warning("  Fresh URL also failed to resolve Drive URL")
     return drive_url
@@ -261,6 +268,23 @@ def main() -> None:
 
     scraper  = ForPSDScraper(FORPSD_COOKIE)
     uploader = DriveUploader(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN)
+
+    # ── Fast startup connectivity check ────────────────────────────────────
+    # Every item requires forpsd.com to resolve its download URL.
+    # If the site is unreachable right now, abort immediately (saves hours of
+    # 30-second-per-item timeouts). State is untouched; scheduler retries later.
+    log.info("🌐 Checking forpsd.com reachability…")
+    try:
+        import requests as _req
+        _ping = _req.head("https://forpsd.com/", timeout=5, allow_redirects=True)
+        log.info(f"  ✅ forpsd.com reachable (HTTP {_ping.status_code})")
+    except Exception as _ping_err:
+        log.error(
+            f"  ❌ forpsd.com is unreachable ({_ping_err.__class__.__name__}: {_ping_err}). "
+            "All items require forpsd.com to resolve download links. "
+            "Exiting early — no state changed. Scheduler will retry next run."
+        )
+        sys.exit(0)
 
     # ── Load trackers ──────────────────────────────────────────────────────
     job_tracker    = JobTracker(JOBS_EXCEL_FILE)
@@ -373,7 +397,11 @@ def main() -> None:
 
             # ── Resolve category ──────────────────────────────────────────
             if not category:
-                if card_title or detail_url:
+                if not scraper.site_reachable:
+                    # Site already down — skip network request entirely
+                    category = "uncategorized"
+                    log.info("  Category: [uncategorized] (forpsd.com unreachable)")
+                elif card_title or detail_url:
                     category = scraper.get_category(detail_url, hint_title=card_title)
                 else:
                     category = "uncategorized"
@@ -382,28 +410,35 @@ def main() -> None:
 
             log.info(f"  Category: [{category}]")
 
-            # ── FIX: Resolve Google Drive URL with fresh-URL fallback ─────
-            # Previously: one attempt only → mark Error if failed.
-            # Now: if the stored /download/ URL fails (JWT expired), we
-            # re-scrape the detail page to get a fresh URL and retry once.
+            # ── Resolve Google Drive URL (site-aware, skips re-scrape on timeout) ─
             drive_url = _resolve_drive_url_with_retry(
                 scraper, download_url, detail_url
             )
             if not drive_url:
-                log.warning("  Could not resolve Drive URL (both attempts failed) — marking Error")
-                job_tracker.mark_error(download_url)
-                errors_this_run += 1
-                consecutive_site_errors += 1
-                if consecutive_site_errors >= MAX_CONSECUTIVE_SITE_ERRORS:
-                    log.error(
-                        f"⚠️  {consecutive_site_errors} consecutive Drive-URL failures — "
-                        "forpsd.com appears unreachable.  Aborting run to avoid wasting "
-                        "time on more timeouts.  State saved; next run will retry."
+                if not scraper.site_reachable:
+                    # Network failure — leave as Pending; retries when site is back
+                    log.warning(
+                        "  forpsd.com unreachable — leaving item Pending for next run"
                     )
-                    break
-                continue
+                    errors_this_run += 1
+                    consecutive_site_errors += 1
+                    if consecutive_site_errors >= MAX_CONSECUTIVE_SITE_ERRORS:
+                        log.error(
+                            f"⚠️  {consecutive_site_errors} consecutive network failures — "
+                            "forpsd.com is down. Aborting run; all items remain Pending "
+                            "and will retry on the next scheduled run."
+                        )
+                        break
+                    continue  # ← No mark_error — item stays Pending
+                else:
+                    # Site reachable but URL genuinely failed → permanent Error
+                    log.warning("  Could not resolve Drive URL — marking Error")
+                    job_tracker.mark_error(download_url)
+                    errors_this_run += 1
+                    consecutive_site_errors = 0
+                    continue
 
-            consecutive_site_errors = 0   # reset on any success
+            consecutive_site_errors = 0  # reset on any success
 
             log.info(f"  Drive URL: {drive_url}")
 
