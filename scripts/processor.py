@@ -43,8 +43,11 @@ def extract_archive(archive_path: Path, dest_dir: Path) -> bool:
             )
             if result.returncode == 0:
                 return True
-            import patoollib
-            patoollib.extract_archive(str(archive_path), outdir=str(dest_dir))
+            # Fallback: use rarfile Python library (already in requirements.txt)
+            log.warning("  unrar binary failed — falling back to rarfile library")
+            import rarfile as _rarfile
+            with _rarfile.RarFile(str(archive_path)) as rf:
+                rf.extractall(str(dest_dir))
             return True
 
         if ext in (".7z", ".7zip"):
@@ -54,9 +57,14 @@ def extract_archive(archive_path: Path, dest_dir: Path) -> bool:
             )
             return True
 
-        import patoollib
-        patoollib.extract_archive(str(archive_path), outdir=str(dest_dir))
-        return True
+        # Generic fallback: use zipfile/rarfile if format is recognized
+        log.warning(f"  Unknown archive ext {ext!r} — attempting generic extraction")
+        import zipfile as _zf
+        if _zf.is_zipfile(str(archive_path)):
+            with _zf.ZipFile(archive_path, "r") as zf:
+                zf.extractall(dest_dir)
+            return True
+        raise ValueError(f"Unsupported archive format: {archive_path.name}")
 
     except Exception as exc:
         log.error(f"Extraction failed for {archive_path}: {exc}")

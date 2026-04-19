@@ -273,17 +273,34 @@ def main() -> None:
     # Every item requires forpsd.com to resolve its download URL.
     # If the site is unreachable right now, abort immediately (saves hours of
     # 30-second-per-item timeouts). State is untouched; scheduler retries later.
+    # Retries up to 3 times with a 15-second gap before giving up.
     log.info("🌐 Checking forpsd.com reachability…")
-    try:
-        import requests as _req
-        _ping = _req.head("https://forpsd.com/", timeout=5, allow_redirects=True)
-        log.info(f"  ✅ forpsd.com reachable (HTTP {_ping.status_code})")
-    except Exception as _ping_err:
-        log.error(
-            f"  ❌ forpsd.com is unreachable ({_ping_err.__class__.__name__}: {_ping_err}). "
-            "All items require forpsd.com to resolve download links. "
-            "Exiting early — no state changed. Scheduler will retry next run."
-        )
+    _MAX_PING_RETRIES = 3
+    _PING_TIMEOUT_SEC = 10
+    _ping_ok = False
+    for _attempt in range(1, _MAX_PING_RETRIES + 1):
+        try:
+            import requests as _req
+            _ping = _req.head("https://forpsd.com/", timeout=_PING_TIMEOUT_SEC, allow_redirects=True)
+            log.info(f"  ✅ forpsd.com reachable (HTTP {_ping.status_code})")
+            _ping_ok = True
+            break
+        except Exception as _ping_err:
+            if _attempt < _MAX_PING_RETRIES:
+                log.warning(
+                    f"  ⚠️  Attempt {_attempt}/{_MAX_PING_RETRIES} failed "
+                    f"({_ping_err.__class__.__name__}: {_ping_err}). "
+                    f"Retrying in 15 s…"
+                )
+                time.sleep(15)
+            else:
+                log.error(
+                    f"  ❌ forpsd.com is unreachable after {_MAX_PING_RETRIES} attempts "
+                    f"({_ping_err.__class__.__name__}: {_ping_err}). "
+                    "All items require forpsd.com to resolve download links. "
+                    "Exiting early — no state changed. Scheduler will retry next run."
+                )
+    if not _ping_ok:
         sys.exit(0)
 
     # ── Load trackers ──────────────────────────────────────────────────────
