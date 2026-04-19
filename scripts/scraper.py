@@ -469,17 +469,24 @@ class ForPSDScraper:
         return items
 
 
+    # Generic heading/alt text that forpsd.com uses for card thumbnails —
+    # useless for category detection, must be filtered out everywhere.
+    _GENERIC_CARD_TEXT = {
+        "image preview", "preview", "image", "thumbnail", "photo", "img",
+        "free download", "download", "psd file", "psd", "file",
+    }
+
     def _extract_card_title(self, card) -> str:
         for htag in card.find_all(["h1", "h2", "h3", "h4", "h5"]):
             text = htag.get_text(strip=True)
-            if text and len(text) > 3:
+            # Skip generic placeholder headings (e.g. "Image Preview") that
+            # are not real product titles and trigger spurious warnings.
+            if text and len(text) > 3 and text.lower() not in self._GENERIC_CARD_TEXT:
                 return text
 
         img = card.find("img", alt=True)
         alt = img.get("alt", "").strip() if img else ""
-        # Skip generic/useless alt values that forpsd.com uses for thumbnails
-        _GENERIC_ALTS = {"image preview", "preview", "image", "thumbnail", "photo", "img"}
-        if alt and alt.lower() not in _GENERIC_ALTS:
+        if alt and alt.lower() not in self._GENERIC_CARD_TEXT:
             return alt
 
         for p in card.find_all("p"):

@@ -66,6 +66,11 @@ from job_tracker import JobTracker
 
 POSTS_PER_PAGE: int = 17
 
+# When the forpsd.com site is unreachable every item burns ~60 s on timeouts
+# before being marked Error.  Abort the run early if this many consecutive
+# items all fail at the Drive-URL resolution step (site is clearly down).
+MAX_CONSECUTIVE_SITE_ERRORS: int = 5
+
 _REPO_ROOT      = Path(STATE_FILE).parent
 EXCEL_LOG_FILE  = str(_REPO_ROOT / "rename_log.xlsx")
 JOBS_EXCEL_FILE = str(_REPO_ROOT / "jobs.xlsx")
@@ -331,6 +336,7 @@ def main() -> None:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     processed_this_run = 0
     errors_this_run    = 0
+    consecutive_site_errors = 0   # tracks back-to-back Drive-URL failures
 
     for item in pending:
         download_url = item.get("download_url", "")
@@ -387,7 +393,17 @@ def main() -> None:
                 log.warning("  Could not resolve Drive URL (both attempts failed) — marking Error")
                 job_tracker.mark_error(download_url)
                 errors_this_run += 1
+                consecutive_site_errors += 1
+                if consecutive_site_errors >= MAX_CONSECUTIVE_SITE_ERRORS:
+                    log.error(
+                        f"⚠️  {consecutive_site_errors} consecutive Drive-URL failures — "
+                        "forpsd.com appears unreachable.  Aborting run to avoid wasting "
+                        "time on more timeouts.  State saved; next run will retry."
+                    )
+                    break
                 continue
+
+            consecutive_site_errors = 0   # reset on any success
 
             log.info(f"  Drive URL: {drive_url}")
 
