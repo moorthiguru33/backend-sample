@@ -103,13 +103,8 @@ jobs:
       # stops after that many items and does NOT self-trigger.
       # When item_limit=0 (default/unlimited), the pipeline self-triggers
       # every run until everything is done.
-      - name: Sleep 10 minutes before re-triggering
-        if: |
-          steps.check.outputs.status == 'continue' &&
-          (github.event.inputs.item_limit == '0' || github.event.inputs.item_limit == '')
-        run: |
-          echo "Sleeping 10 minutes before next run..."
-          sleep 600
+      # NOTE: No sleep here — sleeping inside a 360-min job wastes timeout budget.
+      # GitHub queues the next run naturally; no artificial delay needed.
 
       - name: Trigger next run
         if: |
@@ -117,7 +112,9 @@ jobs:
           (github.event.inputs.item_limit == '0' || github.event.inputs.item_limit == '')
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Use GH_PAT (personal access token with workflow scope) for reliability.
+          # Falls back to GITHUB_TOKEN if GH_PAT is not set.
+          github-token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           script: |
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
