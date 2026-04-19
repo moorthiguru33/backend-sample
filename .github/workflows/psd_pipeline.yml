@@ -110,6 +110,7 @@ jobs:
           git add preview_image/ 2>/dev/null || true
           git diff --cached --quiet || \
             git commit -m "ci: add preview images $(date '+%Y-%m-%d %H:%M UTC')"
+          git pull --rebase origin main || true
           git push origin main || true
 
       # ── 8. Summary ──────────────────────────────────────────────────────────
