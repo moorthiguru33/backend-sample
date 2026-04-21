@@ -5,24 +5,26 @@
 # ║  Preview images upload to    : backend-sample/preview_image/         ║
 # ║  designs.xlsx pushed to      : moorthiguru33/Gurumoorthi             ║
 # ║                                                                      ║
+# ║  Supported file types        : .psd  .psb  .tiff  .tif  .png        ║
+# ║                                                                      ║
 # ║  Required Secrets (Settings → Secrets → Actions):                   ║
 # ║    GOOGLE_CLIENT_ID      Google OAuth2 client ID                    ║
 # ║    GOOGLE_CLIENT_SECRET  Google OAuth2 client secret                ║
 # ║    GOOGLE_REFRESH_TOKEN  OAuth2 refresh token (one-time setup)      ║
-# ║    GDRIVE_PSD_FOLDER     GDrive folder ID — PSD source folder       ║
+# ║    GDRIVE_PSD_FOLDER     GDrive folder ID — source files folder     ║
 # ║    GDRIVE_UPLOAD_FOLDER  GDrive folder ID — ZIP destination folder  ║
 # ║    SCOPE                 ModelScope API token                       ║
 # ║    GH_PAT                GitHub PAT (repo scope, access both repos) ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 
-name: Tamil PSD Pipeline
+name: Tamil PSD/PNG Pipeline
 
 on:
   workflow_dispatch:
     inputs:
       file_count:
         description: >
-          How many PSD files to process this run.
+          How many files (PSD/TIFF/PNG) to process this run.
           10  = process 10 files.
           100 = process 100 files.
           0   = use default (50 files).
@@ -38,7 +40,7 @@ on:
 
 jobs:
   psd-pipeline:
-    name: Process PSD Designs
+    name: Process PSD/PNG Designs
     runs-on: ubuntu-latest
     timeout-minutes: 350   # 5h 50m — GH Actions hard limit is 6h
 
@@ -117,8 +119,9 @@ jobs:
       - name: Print summary
         if: always()
         run: |
-          echo "## Tamil PSD Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## Tamil PSD/PNG Pipeline Summary" >> $GITHUB_STEP_SUMMARY
           echo "- Run completed at: $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "- Supported types: .psd  .psb  .tiff  .tif  .png" >> $GITHUB_STEP_SUMMARY
           echo "- Preview images: \`backend-sample/preview_image/\`" >> $GITHUB_STEP_SUMMARY
           echo "- CDN base: \`https://cdn.jsdelivr.net/gh/moorthiguru33/backend-sample@main/preview_image/\`" >> $GITHUB_STEP_SUMMARY
           echo "- designs.xlsx: \`moorthiguru33/Gurumoorthi/designs.xlsx\`" >> $GITHUB_STEP_SUMMARY
