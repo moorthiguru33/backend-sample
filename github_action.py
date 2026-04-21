@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║         Tamil PSD Marketplace — GitHub Actions Pipeline v2          ║
+║       Tamil PSD Marketplace — GitHub Actions Pipeline v2.1          ║
 ║  ─────────────────────────────────────────────────────────────────  ║
 ║  1.  Auth Google Drive via OAuth2 refresh token (headless/CI)       ║
 ║  2.  Fetch designs.xlsx from Gurumoorthi repo                       ║
-║  3.  Scan GDrive PSD folder — subfolders = categories               ║
+║  3.  Scan GDrive folder — subfolders = categories                   ║
 ║  4.  Skip already-processed IDs                                     ║
-║  5.  Download PSD → convert to WebP preview (<80KB, watermarked)    ║
+║  5.  Download PSD/TIFF/PNG → convert to WebP preview (<80KB, wm)   ║
 ║  6.  Save WebP locally + upload to backend-sample/preview_image/    ║
-║  7.  Zip PSD → upload to GDRIVE_UPLOAD_FOLDER → download URL        ║
+║  7.  Zip file → upload to GDRIVE_UPLOAD_FOLDER → download URL       ║
 ║  8.  ModelScope Qwen2.5-VL vision AI → SEO title/tags/description   ║
 ║  9.  Append rows to designs.xlsx                                     ║
 ║  10. Push designs.xlsx back to Gurumoorthi repo                     ║
@@ -41,7 +41,7 @@ from openpyxl.utils import get_column_letter
 GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN", "")
-GDRIVE_PSD_FOLDER    = os.environ.get("GDRIVE_PSD_FOLDER", "")
+GDRIVE_PSD_FOLDER    = os.environ.get("GDRIVE_PSD_FOLDER", "")  # folder with PSD/TIFF/PNG files
 GDRIVE_UPLOAD_FOLDER = os.environ.get("GDRIVE_UPLOAD_FOLDER", "")
 MODELSCOPE_TOKEN     = os.environ.get("SCOPE", "")
 GH_PAT               = os.environ.get("GH_PAT", "")
@@ -369,6 +369,16 @@ def to_webp_bytes(file_bytes: bytes, filename: str,
             except Exception as psd_err:
                 log(f"    ⚠  psd_tools: {psd_err} — falling back to PIL")
                 img = PILImage.open(io.BytesIO(file_bytes))
+        elif ext == ".png":
+            img = PILImage.open(io.BytesIO(file_bytes))
+            # PNGs are often RGBA (transparent); ensure we keep the alpha channel
+            # intact so the watermark composite works correctly.
+            if img.mode not in ("RGB", "RGBA", "L", "LA", "P"):
+                img = img.convert("RGBA")
+            if img.mode == "P":
+                img = img.convert("RGBA")   # palette-mode PNG → RGBA
+            if img.mode == "LA":
+                img = img.convert("RGBA")
         else:
             img = PILImage.open(io.BytesIO(file_bytes))
 
@@ -384,9 +394,15 @@ def to_webp_bytes(file_bytes: bytes, filename: str,
 
         img = add_watermark(img)
 
-        bg = PILImage.new("RGB", img.size, (255, 255, 255))
-        bg.paste(img, mask=img.split()[3])
-        img = bg
+        # Flatten RGBA → RGB on white background before saving WebP
+        if img.mode == "RGBA":
+            bg = PILImage.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[3])
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        else:
+            bg = img
 
         target_bytes = WEBP_TARGET_KB * 1024
         quality      = WEBP_QUALITY_START
@@ -640,7 +656,7 @@ Example: "Elegant Tamil Hindu Wedding Gold Border Flex Banner PSD Template Downl
 UNIQUE per design — vary wording, visual element, and structure every time.
 
 ##TAGS##
-10 unique lowercase comma-separated tags. Include: occasion, format, "psd template", 2–3 Tamil transliterated terms. No "free download". No numbering. No brackets.
+10 unique lowercase comma-separated tags. Include: occasion, format (use "psd template" for PSD files, "png download" for PNG files), 2–3 Tamil transliterated terms. No "free download". No numbering. No brackets.
 
 ##DIMENSIONS##
 ONE only: 1800x1200 pixels | 1050x1500 pixels | 1080x1080 pixels | 2480x3508 pixels | 1050x600 pixels
@@ -1235,6 +1251,13 @@ def main():
                     from psd_tools import PSDImage
                     psd    = PSDImage.open(io.BytesIO(raw_bytes))
                     ai_img = psd.composite() or PILImage.open(io.BytesIO(raw_bytes))
+                elif ext == ".png":
+                    ai_img = PILImage.open(io.BytesIO(raw_bytes))
+                    # Handle palette-mode and other unusual PNG modes
+                    if ai_img.mode == "P":
+                        ai_img = ai_img.convert("RGBA")
+                    if ai_img.mode == "LA":
+                        ai_img = ai_img.convert("RGBA")
                 else:
                     ai_img = PILImage.open(io.BytesIO(raw_bytes))
                 if ai_img.mode not in ("RGB", "RGBA"):
@@ -1326,6 +1349,10 @@ def main():
                     cat_label = category or "Others"
 
             color_mode = "CMYK" if ext in (".psd", ".psb") else "RGB"
+            software   = "Adobe Photoshop CC" if ext in (".psd", ".psb") else (
+                         "Adobe Photoshop CC / Illustrator" if ext == ".png" else
+                         "Adobe Photoshop CC"
+                        )
 
             new_rows.append([
                 stem,                       # ID
@@ -1338,7 +1365,7 @@ def main():
                 "300 DPI",                  # DPI
                 file_size,                  # File Size
                 color_mode,                 # Color Mode
-                "Adobe Photoshop CC",       # Software
+                software,                   # Software
                 "",                         # Fonts Used
                 preview_url,                # Preview URL
             ])
