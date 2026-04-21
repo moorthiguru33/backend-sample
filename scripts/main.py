@@ -168,7 +168,7 @@ def _topup_scrape(scraper: ForPSDScraper, job_tracker: JobTracker,
 # ── Archive helpers ────────────────────────────────────────────────────────
 
 def _list_archive_originals(archive_path: Path) -> list[str]:
-    TARGET_EXT = {".psd", ".tif", ".tiff"}
+    TARGET_EXT = {".psd", ".tif", ".tiff", ".png"}
     names: list[str] = []
     try:
         suffix = archive_path.suffix.lower()
@@ -475,7 +475,7 @@ def main() -> None:
 
             # ── List original filenames ───────────────────────────────────
             original_names = _list_archive_originals(archive)
-            log.info(f"  Archive: {len(original_names)} PSD/TIF file(s) inside")
+            log.info(f"  Archive: {len(original_names)} PSD/TIF/PNG file(s) inside")
 
             # ── SKIP ② — ALL files already in rename_log.xlsx ────────────
             if original_names and all(

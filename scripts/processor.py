@@ -2,9 +2,9 @@
 processor.py – Simplified pipeline (no WebP, no image processing):
 
   1. Extract ZIP / RAR / 7Z archive.
-  2. Find all PSD and TIF/TIFF files inside (ignore .txt and others).
+  2. Find all PSD, TIF/TIFF, and PNG files inside (ignore .txt and others).
   3. For each file:
-       a. Copy & rename to tamilpsd-XXXX.psd / .tif
+       a. Copy & rename to tamilpsd-XXXX.psd / .tif / .png
   4. Return (renamed_psd_files, next_index).
      - renamed_psd_files → GDRIVE_PSD_FOLDER  (psd/)
 
@@ -126,16 +126,20 @@ def process_archive(
     if not extract_archive(archive_path, extract_dir):
         return None
 
-    # ── Step 2: Find PSD / TIF files (skip .txt and others) ───────────────
+    # ── Step 2: Find PSD / TIF / PNG files (skip .txt and others) ────────
     source_files: list[Path] = []
-    for pattern in ("*.psd", "*.PSD", "*.tif", "*.TIF", "*.tiff", "*.TIFF"):
+    for pattern in (
+        "*.psd", "*.PSD",
+        "*.tif", "*.TIF", "*.tiff", "*.TIFF",
+        "*.png", "*.PNG",
+    ):
         source_files.extend(extract_dir.rglob(pattern))
 
     if not source_files:
-        log.warning(f"No PSD/TIF files found in {archive_path.name}")
+        log.warning(f"No PSD/TIF/PNG files found in {archive_path.name}")
         return None
 
-    log.info(f"Found {len(source_files)} PSD/TIF file(s). Starting index: {start_index}")
+    log.info(f"Found {len(source_files)} PSD/TIF/PNG file(s). Starting index: {start_index}")
 
     renamed_files: list[Path] = []
     current_index = start_index
@@ -144,7 +148,7 @@ def process_archive(
         base_name = make_tamilpsd_name(current_index)
         new_ext   = src.suffix.lower()   # .psd or .tif/.tiff
 
-        # ── Rename (copy) original PSD/TIF ────────────────────────────────
+        # ── Rename (copy) original PSD/TIF/PNG ────────────────────────────
         renamed_src = renamed_dir / f"{base_name}{new_ext}"
         try:
             shutil.copy2(src, renamed_src)
