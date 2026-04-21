@@ -61,12 +61,35 @@ CDN_BASE = f"https://cdn.jsdelivr.net/gh/{BACKEND_REPO}@main/{PREVIEW_DIR}"
 
 # ── ModelScope ────────────────────────────────────────────────────────────────
 MODELSCOPE_API = "https://api-inference.modelscope.ai/v1/chat/completions"
-VISION_MODEL   = "Qwen/Qwen2.5-VL-32B-Instruct"
+
+# Vision models tried in order — if one hits quota the next is tried automatically
+VISION_MODELS = [
+    "Qwen/Qwen2.5-VL-32B-Instruct",
+    "Qwen/Qwen2.5-VL-7B-Instruct",
+]
+
+# Text-only fallback models (no image needed) — used when vision models all fail
+TEXT_FALLBACK_MODELS = [
+    "Qwen/Qwen2.5-72B-Instruct",
+    "Qwen/Qwen2.5-32B-Instruct",
+    "Qwen/Qwen2.5-7B-Instruct",
+]
+
+# Multiple API keys — set SCOPE, SCOPE2, SCOPE3 in GitHub secrets for key rotation
+def _get_scope_keys() -> list:
+    keys = []
+    for env in ["SCOPE", "SCOPE2", "SCOPE3"]:
+        k = os.environ.get(env, "").strip()
+        if k:
+            keys.append(k)
+    return keys or [""]  # fallback to empty so error is clear
+
+VISION_MODEL = VISION_MODELS[0]  # kept for backward compat reference
 
 # ── Processing limits ─────────────────────────────────────────────────────────
 _env_count  = int(os.environ.get("FILE_COUNT", "0"))
 MAX_PER_RUN = _env_count if _env_count > 0 else 50
-AI_DELAY    = 5      # seconds between AI calls
+AI_DELAY    = 8      # seconds between AI calls (increased to reduce quota pressure)
 
 # ── WebP preview settings ─────────────────────────────────────────────────────
 PREVIEW_MAX_SIZE   = 1280
@@ -1030,79 +1053,110 @@ def truncate_description(desc: str, max_words: int = 380, min_words: int = 300) 
 # ║         MODELSCOPE AI CALL                  ║
 # ╚══════════════════════════════════════════════╝
 
-def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 5) -> str:
+def _is_quota_error(status_code: int, data: dict) -> bool:
+    """Detect quota / rate-limit errors from any ModelScope response shape."""
+    if status_code == 429:
+        return True
+    err_obj  = data.get("error", {})
+    err_code = str(err_obj.get("code", "")).lower() if isinstance(err_obj, dict) else ""
+    err_msg  = str(err_obj.get("message", data.get("message", ""))).lower()
+    quota_signals = ["quota", "rate", "throttl", "limit", "exceed", "too many", "capacity",
+                     "overload", "busy", "unavailable", "concurr"]
+    return any(s in err_msg or s in err_code for s in quota_signals)
+
+
+def _ms_post(api_key: str, payload: dict, timeout: int = 120) -> requests.Response:
+    return requests.post(
+        MODELSCOPE_API,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=timeout,
+    )
+
+
+def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 3) -> str:
+    """
+    Vision SEO call with full fallback chain:
+      1. Try every (api_key × vision_model) combination
+      2. On quota/rate error → rotate to next key, then next model
+      3. Exponential backoff with jitter
+    Returns raw AI text or "" if all combinations exhausted.
+    """
+    import random
     full_prompt = (folder_hint.strip() + "\n\n" if folder_hint.strip() else "") + SEO_PROMPT
-    headers = {
-        "Authorization": f"Bearer {MODELSCOPE_TOKEN}",
-        "Content-Type":  "application/json",
-    }
-    payload = {
-        "model": VISION_MODEL,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{jpg_b64}"}
-                },
-                {"type": "text", "text": full_prompt}
-            ]
-        }],
-        # Increased to 1500 — needed for title+tags+dims+300-380w English description.
-        # 900 was too low and caused short descriptions (~160w). 1500 is the safe ceiling.
-        "max_tokens": 1500,
-        "temperature": 0.75,
-    }
+    keys = _get_scope_keys()
 
-    for attempt in range(retries):
-        try:
-            resp = requests.post(
-                MODELSCOPE_API, headers=headers, json=payload, timeout=120
-            )
-
-            if resp.status_code == 429:
-                wait = 60 * (attempt + 1)
-                log(f"    ⚠  ModelScope HTTP 429 rate-limit (attempt {attempt+1}/{retries}) — waiting {wait}s")
-                time.sleep(wait)
+    for model in VISION_MODELS:
+        for key_idx, api_key in enumerate(keys):
+            if not api_key:
+                log(f"    ⚠  No SCOPE API key configured — set SCOPE secret")
                 continue
 
-            if resp.status_code in (502, 503, 504):
-                wait = 30 * (attempt + 1)
-                log(f"    ⚠  ModelScope HTTP {resp.status_code} transient error (attempt {attempt+1}/{retries}) — waiting {wait}s")
-                time.sleep(wait)
-                continue
+            log(f"    🤖 Trying vision model: {model.split('/')[-1]} (key #{key_idx+1})")
+            payload = {
+                "model": model,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{jpg_b64}"}},
+                        {"type": "text", "text": full_prompt},
+                    ],
+                }],
+                "max_tokens": 1500,
+                "temperature": 0.75,
+            }
 
-            data = resp.json()
+            for attempt in range(retries):
+                try:
+                    resp = _ms_post(api_key, payload)
 
-            if "choices" in data:
-                raw_content = data["choices"][0]["message"]["content"].strip()
-                log(f"    📝 AI raw (first 200 chars): {raw_content[:200]!r}")
-                return raw_content
+                    # Transient server errors — short retry, same model+key
+                    if resp.status_code in (502, 503, 504):
+                        wait = 15 * (2 ** attempt) + random.uniform(0, 5)
+                        log(f"    ⚠  HTTP {resp.status_code} transient (attempt {attempt+1}/{retries}) — retry in {wait:.0f}s")
+                        time.sleep(wait)
+                        continue
 
-            err_obj  = data.get("error", {})
-            err_code = str(err_obj.get("code", "")).lower() if isinstance(err_obj, dict) else ""
-            err_msg  = str(err_obj.get("message", data.get("message", str(data)[:300]))).lower()
+                    # Parse response
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {}
 
-            if "quota" in err_msg or "quota" in err_code:
-                wait = 90 * (attempt + 1)
-                log(f"    ⚠  ModelScope quota error (attempt {attempt+1}/{retries}) — waiting {wait}s: {err_msg[:200]}")
-                time.sleep(wait)
-                continue
+                    # Success
+                    if resp.status_code == 200 and "choices" in data:
+                        raw_content = data["choices"][0]["message"]["content"].strip()
+                        log(f"    📝 AI raw (first 200 chars): {raw_content[:200]!r}")
+                        return raw_content
 
-            if "rate" in err_msg or "throttl" in err_msg:
-                wait = 60 * (attempt + 1)
-                log(f"    ⚠  ModelScope rate-limit error (attempt {attempt+1}/{retries}) — waiting {wait}s")
-                time.sleep(wait)
-                continue
+                    # Quota / rate-limit → break inner loop, try next key/model
+                    if _is_quota_error(resp.status_code, data):
+                        err_preview = str(data)[:150]
+                        log(f"    ⚠  Quota/rate-limit on {model.split('/')[-1]} key#{key_idx+1} "
+                            f"(attempt {attempt+1}): {err_preview}")
+                        # Small wait before rotating
+                        wait = 10 * (attempt + 1) + random.uniform(0, 5)
+                        time.sleep(wait)
+                        break  # rotate to next key
 
-            log(f"    ⚠  ModelScope no choices (attempt {attempt+1}/{retries}): {str(data)[:300]}")
+                    # Other API error — log and retry with backoff
+                    log(f"    ⚠  Unexpected response (attempt {attempt+1}/{retries}): "
+                        f"HTTP {resp.status_code} — {str(data)[:200]}")
 
-        except Exception as e:
-            log(f"    ⚠  ModelScope request error (attempt {attempt+1}/{retries}): {e}")
+                except requests.exceptions.Timeout:
+                    log(f"    ⚠  Timeout (attempt {attempt+1}/{retries})")
+                except Exception as e:
+                    log(f"    ⚠  Request error (attempt {attempt+1}/{retries}): {e}")
 
-        if attempt < retries - 1:
-            time.sleep(20 * (attempt + 1))
+                if attempt < retries - 1:
+                    wait = 10 * (2 ** attempt) + random.uniform(0, 5)
+                    time.sleep(wait)
 
+            # Finished retries for this key — continue to next key
+
+        log(f"    ⚠  All keys exhausted for vision model {model.split('/')[-1]} — trying next model")
+
+    log("    ❌ All vision models and keys exhausted — falling back to text-only")
     return ""
 
 
@@ -1111,6 +1165,12 @@ def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 5) -> st
 # ╚══════════════════════════════════════════════╝
 
 def generate_seo_fallback(filename: str, category: str) -> str:
+    """
+    Text-only SEO generation — uses TEXT_FALLBACK_MODELS (not vision models).
+    This ensures we never hit the same exhausted vision quota.
+    Tries every (api_key × text_model) combination with backoff.
+    """
+    import random
     stem = Path(filename).stem
     prompt = (
         f"You are a Tamil PSD marketplace SEO expert.\n"
@@ -1119,23 +1179,46 @@ def generate_seo_fallback(filename: str, category: str) -> str:
         f"Category folder: {category or 'General'}\n\n"
         + SEO_PROMPT
     )
-    headers = {
-        "Authorization": f"Bearer {MODELSCOPE_TOKEN}",
-        "Content-Type":  "application/json",
-    }
-    payload = {
-        "model": VISION_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1500,
-        "temperature": 0.7,
-    }
-    try:
-        resp = requests.post(MODELSCOPE_API, headers=headers, json=payload, timeout=90)
-        data = resp.json()
-        if "choices" in data:
-            return data["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        log(f"    ⚠  Text-only fallback also failed: {e}")
+    keys = _get_scope_keys()
+
+    for model in TEXT_FALLBACK_MODELS:
+        for key_idx, api_key in enumerate(keys):
+            if not api_key:
+                continue
+            log(f"    🔁 Text fallback: {model.split('/')[-1]} (key #{key_idx+1})")
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 1500,
+                "temperature": 0.7,
+            }
+            for attempt in range(3):
+                try:
+                    resp = _ms_post(api_key, payload, timeout=90)
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {}
+
+                    if resp.status_code == 200 and "choices" in data:
+                        result = data["choices"][0]["message"]["content"].strip()
+                        log(f"    ✅ Text fallback succeeded with {model.split('/')[-1]}")
+                        return result
+
+                    if _is_quota_error(resp.status_code, data):
+                        log(f"    ⚠  Text fallback quota hit: {model.split('/')[-1]} key#{key_idx+1}")
+                        time.sleep(10 * (attempt + 1) + random.uniform(0, 3))
+                        break  # try next key
+
+                    log(f"    ⚠  Text fallback HTTP {resp.status_code}: {str(data)[:150]}")
+
+                except Exception as e:
+                    log(f"    ⚠  Text fallback error (attempt {attempt+1}): {e}")
+
+                if attempt < 2:
+                    time.sleep(8 * (2 ** attempt) + random.uniform(0, 3))
+
+    log("    ❌ Text-only fallback also fully exhausted")
     return ""
 
 
