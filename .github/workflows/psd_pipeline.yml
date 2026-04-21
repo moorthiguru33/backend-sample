@@ -95,6 +95,8 @@ jobs:
           GDRIVE_PSD_FOLDER:    ${{ secrets.GDRIVE_PSD_FOLDER }}
           GDRIVE_UPLOAD_FOLDER: ${{ secrets.GDRIVE_UPLOAD_FOLDER }}
           SCOPE:                ${{ secrets.SCOPE }}
+          SCOPE2:               ${{ secrets.SCOPE2 }}
+          SCOPE3:               ${{ secrets.SCOPE3 }}
           GH_PAT:               ${{ secrets.GH_PAT }}
           GITHUB_TOKEN:         ${{ secrets.GITHUB_TOKEN }}
           FILE_COUNT:           ${{ github.event.inputs.file_count || '0' }}
