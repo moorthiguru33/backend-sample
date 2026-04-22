@@ -175,13 +175,16 @@ def cleanup_drive(valid_names: set, dry_run: bool) -> None:
             log.info(f"  ... and {len(to_delete)-50} more")
         return
 
+    import time as _time
     log.info(f"🗑️  Deleting {len(to_delete)} extra files from Drive…")
+    log.info(f"   (This may take several minutes for large batches)")
     for i, (fid, name, folder) in enumerate(to_delete, 1):
         try:
             svc.files().delete(fileId=fid).execute()
             total_deleted += 1
-            if i % 100 == 0:
-                log.info(f"  Deleted {i}/{len(to_delete)}…")
+            if i % 50 == 0:
+                log.info(f"  ✅ Deleted {i}/{len(to_delete)} ({total_deleted} success)…")
+                _time.sleep(0.5)   # avoid Drive API rate limit
         except Exception as exc:
             log.warning(f"  Could not delete {name}: {exc}")
 
@@ -276,10 +279,7 @@ def main():
         log.info("🔵 DRY RUN MODE — nothing will be deleted")
     else:
         log.info("🔴 LIVE MODE — files WILL be permanently deleted!")
-        confirm = input("Type YES to confirm: ")
-        if confirm.strip().upper() != "YES":
-            log.info("Aborted.")
-            sys.exit(0)
+        log.info("   (Confirmation via --no-dry-run flag — no interactive prompt in CI)")
 
     # Load valid names
     valid_names = load_valid_names(RENAME_LOG)
