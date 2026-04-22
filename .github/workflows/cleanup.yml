@@ -1,0 +1,79 @@
+name: Cleanup Duplicate Files
+
+on:
+  # Run manually only — never automatically
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >
+          DRY RUN mode?
+          true  = just show what would be deleted (safe to test)
+          false = actually delete duplicate files from Drive + preview_image/
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install openpyxl google-auth google-auth-oauthlib google-api-python-client
+
+      - name: Pull latest state
+        run: git pull origin main || true
+
+      - name: Run cleanup
+        env:
+          GOOGLE_CLIENT_ID:      ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET:  ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN:  ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          GDRIVE_PSD_FOLDER:     ${{ secrets.GDRIVE_PSD_FOLDER }}
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "Running in DRY RUN mode"
+            python scripts/cleanup_duplicates.py --dry-run --drive --preview
+          else
+            echo "Running in LIVE DELETE mode"
+            python scripts/cleanup_duplicates.py --no-dry-run --drive --preview
+          fi
+
+      - name: Commit cleaned preview_image folder
+        if: ${{ github.event.inputs.dry_run == 'false' }}
+        run: |
+          git config user.name  "PSD-Bot"
+          git config user.email "psdbot@automation.local"
+          git add preview_image/ 2>/dev/null || true
+          git diff --cached --quiet || \
+            git commit -m "🧹 Cleanup: remove duplicate preview files $(date '+%Y-%m-%d %H:%M UTC')"
+          git push origin main || true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Cleanup Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Mode: ${{ github.event.inputs.dry_run == 'true' && 'DRY RUN' || 'LIVE DELETE' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Completed at: $(date -u)" >> $GITHUB_STEP_SUMMARY
+          WEBP_COUNT=$(find preview_image/ -name "*.webp" 2>/dev/null | wc -l)
+          echo "- Preview files remaining: $WEBP_COUNT" >> $GITHUB_STEP_SUMMARY

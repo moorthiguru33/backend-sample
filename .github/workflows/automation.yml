@@ -1,6 +1,9 @@
 name: PSD Automation Pipeline
 
 on:
+  # ── Only runs when you manually click "Run workflow" ─────────────────────
+  # Schedule and auto self-trigger REMOVED to prevent duplicate uploads.
+  # To run: GitHub → Actions → PSD Automation Pipeline → Run workflow
   workflow_dispatch:
     inputs:
       item_limit:
@@ -8,15 +11,13 @@ on:
           How many items to download and upload this run.
           1    = process exactly 1 file.
           100  = process exactly 100 files.
-          0    = no limit (process everything pending, auto-continues until done).
+          0    = process everything pending (stops when done - no auto restart).
         required: false
-        default: '0'
-  schedule:
-    - cron: '0 */7 * * *'   # Safety fallback every 7 hours
+        default: '50'
 
 concurrency:
   group: psd-automation
-  cancel-in-progress: false  # Never cancel a running job
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -25,17 +26,15 @@ permissions:
 jobs:
   automate:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # GitHub hard max = 6 hours
+    timeout-minutes: 360
 
     steps:
-      # ── 1. Checkout ────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      # ── 2. Python setup ────────────────────────────────────────────────────
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -51,17 +50,14 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      # ── 3. System tools (unrar, 7zip) ──────────────────────────────────────
       - name: Install system tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y unrar-free p7zip-full libmagic1
 
-      # ── 4. Pull latest state from repo ─────────────────────────────────────
       - name: Pull latest state
         run: git pull origin main || true
 
-      # ── 5. Run automation ──────────────────────────────────────────────────
       - name: Run automation
         env:
           FORPSD_COOKIE:         ${{ secrets.FORPSD_COOKIE }}
@@ -71,10 +67,9 @@ jobs:
           GDRIVE_PSD_FOLDER:     ${{ secrets.GDRIVE_PSD_FOLDER }}
           RUN_MINUTES: "330"
           PAGE_LIMIT:  "0"
-          ITEM_LIMIT:  ${{ github.event.inputs.item_limit || '0' }}
+          ITEM_LIMIT:  ${{ github.event.inputs.item_limit || '50' }}
         run: python scripts/main.py
 
-      # ── 6. Commit progress ─────────────────────────────────────────────────
       - name: Save state to repo
         if: always()
         run: |
@@ -85,41 +80,10 @@ jobs:
             git commit -m "🤖 Progress: $(date '+%Y-%m-%d %H:%M UTC')"
           git push origin main || true
 
-      # ── 7. Check completion status ─────────────────────────────────────────
-      - name: Check completion status
-        id: check
+      - name: Print summary
         if: always()
         run: |
-          if [ -f ALL_DONE ]; then
-            echo "status=done" >> $GITHUB_OUTPUT
-            echo "All items processed — no next run needed."
-          else
-            echo "status=continue" >> $GITHUB_OUTPUT
-            echo "More items pending — scheduling next run."
-          fi
-
-      # ── 8. Auto-continue (only when item_limit=0, i.e. unlimited run) ──────
-      # When user sets item_limit to a number (1, 100, 1000 etc.), the run
-      # stops after that many items and does NOT self-trigger.
-      # When item_limit=0 (default/unlimited), the pipeline self-triggers
-      # every run until everything is done.
-      # NOTE: No sleep here — sleeping inside a 360-min job wastes timeout budget.
-      # GitHub queues the next run naturally; no artificial delay needed.
-
-      - name: Trigger next run
-        if: |
-          steps.check.outputs.status == 'continue' &&
-          (github.event.inputs.item_limit == '0' || github.event.inputs.item_limit == '')
-        uses: actions/github-script@v7
-        with:
-          # Use GH_PAT (personal access token with workflow scope) for reliability.
-          # Falls back to GITHUB_TOKEN if GH_PAT is not set.
-          github-token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
-              workflow_id: 'automation.yml',
-              ref: 'main'
-            });
-            console.log('Next run triggered successfully.');
+          echo "## PSD Automation Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Run completed at: $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "- Item limit: ${{ github.event.inputs.item_limit || '50' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ⚠️  Auto-schedule DISABLED — manual run only" >> $GITHUB_STEP_SUMMARY

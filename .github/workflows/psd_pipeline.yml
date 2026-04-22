@@ -20,6 +20,9 @@
 name: Tamil PSD/PNG Pipeline
 
 on:
+  # ── Only runs when you manually click "Run workflow" ─────────────────────
+  # Schedule REMOVED to prevent automatic/duplicate runs.
+  # To run: GitHub → Actions → Tamil PSD/PNG Pipeline → Run workflow
   workflow_dispatch:
     inputs:
       file_count:
@@ -29,14 +32,7 @@ on:
           100 = process 100 files.
           0   = use default (50 files).
         required: false
-        default: '0'
-
-  schedule:
-    - cron: '0 */6 * * *'
-
-  # ── Also run on push to main (optional — remove if not needed) ────────────
-  # push:
-  #   branches: [ main ]
+        default: '50'
 
 jobs:
   psd-pipeline:
@@ -44,25 +40,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350   # 5h 50m — GH Actions hard limit is 6h
 
-    # Write permission needed to commit preview images to this repo
     permissions:
       contents: write
 
     steps:
-      # ── 1. Checkout this repo (backend-sample) ──────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 1
 
-      # ── 2. Set up Python ────────────────────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # ── 3. Cache pip packages ───────────────────────────────────────────────
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -71,7 +63,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-psd-
 
-      # ── 4. Install dependencies ─────────────────────────────────────────────
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
@@ -82,11 +73,9 @@ jobs:
             openpyxl \
             requests
 
-      # ── 5. Pull latest state (avoid push conflicts) ──────────────────────────
       - name: Pull latest state
         run: git pull origin main || true
 
-      # ── 6. Run the pipeline ─────────────────────────────────────────────────
       - name: Run Tamil PSD Pipeline
         env:
           GOOGLE_CLIENT_ID:     ${{ secrets.GOOGLE_CLIENT_ID }}
@@ -99,13 +88,9 @@ jobs:
           SCOPE3:               ${{ secrets.SCOPE3 }}
           GH_PAT:               ${{ secrets.GH_PAT }}
           GITHUB_TOKEN:         ${{ secrets.GITHUB_TOKEN }}
-          FILE_COUNT:           ${{ github.event.inputs.file_count || '0' }}
+          FILE_COUNT:           ${{ github.event.inputs.file_count || '50' }}
         run: python github_action.py
 
-      # ── 7. Commit and push WebP preview images ───────────────────────────────
-      # FIX: github_action.py now saves WebP files locally to preview_image/.
-      # This step commits them to the repo so they are reliably persisted,
-      # even if the per-file GitHub API upload (secondary) failed or was rate-limited.
       - name: Commit preview images to repo
         if: always()
         run: |
@@ -117,7 +102,6 @@ jobs:
           git pull --rebase origin main || true
           git push origin main || true
 
-      # ── 8. Summary ──────────────────────────────────────────────────────────
       - name: Print summary
         if: always()
         run: |
@@ -125,7 +109,6 @@ jobs:
           echo "- Run completed at: $(date -u)" >> $GITHUB_STEP_SUMMARY
           echo "- Supported types: .psd  .psb  .tiff  .tif  .png" >> $GITHUB_STEP_SUMMARY
           echo "- Preview images: \`backend-sample/preview_image/\`" >> $GITHUB_STEP_SUMMARY
-          echo "- CDN base: \`https://cdn.jsdelivr.net/gh/moorthiguru33/backend-sample@main/preview_image/\`" >> $GITHUB_STEP_SUMMARY
-          echo "- designs.xlsx: \`moorthiguru33/Gurumoorthi/designs.xlsx\`" >> $GITHUB_STEP_SUMMARY
+          echo "- ⚠️  Auto-schedule DISABLED — manual run only" >> $GITHUB_STEP_SUMMARY
           WEBP_COUNT=$(find preview_image/ -name "*.webp" 2>/dev/null | wc -l)
           echo "- Total WebP files in repo: $WEBP_COUNT" >> $GITHUB_STEP_SUMMARY
