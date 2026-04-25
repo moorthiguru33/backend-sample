@@ -7,8 +7,8 @@ on:
       dry_run:
         description: >
           DRY RUN mode?
-          true  = just show what would be deleted (safe to test)
-          false = actually delete duplicate files from Drive + preview_image/
+          true  = just show what would be moved (safe to test)
+          false = actually move duplicate files to duplicates/ folder
         required: true
         default: 'true'
         type: choice
@@ -52,10 +52,10 @@ jobs:
           GDRIVE_PSD_FOLDER:     ${{ secrets.GDRIVE_PSD_FOLDER }}
         run: |
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            echo "Running in DRY RUN mode"
+            echo "Running in DRY RUN mode — showing what would be moved"
             python scripts/cleanup_duplicates.py --dry-run --drive --preview
           else
-            echo "Running in LIVE DELETE mode"
+            echo "Running in LIVE mode — moving duplicates to duplicates/ folder"
             python scripts/cleanup_duplicates.py --no-dry-run --drive --preview
           fi
 
@@ -66,14 +66,16 @@ jobs:
           git config user.email "psdbot@automation.local"
           git add preview_image/ 2>/dev/null || true
           git diff --cached --quiet || \
-            git commit -m "🧹 Cleanup: remove duplicate preview files $(date '+%Y-%m-%d %H:%M UTC')"
+            git commit -m "🧹 Cleanup: move duplicate preview files to duplicates/ $(date '+%Y-%m-%d %H:%M UTC')"
           git push origin main || true
 
       - name: Summary
         if: always()
         run: |
           echo "## Cleanup Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- Mode: ${{ github.event.inputs.dry_run == 'true' && 'DRY RUN' || 'LIVE DELETE' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Mode: ${{ github.event.inputs.dry_run == 'true' && 'DRY RUN (preview only)' || 'LIVE (moved to duplicates/)' }}" >> $GITHUB_STEP_SUMMARY
           echo "- Completed at: $(date -u)" >> $GITHUB_STEP_SUMMARY
-          WEBP_COUNT=$(find preview_image/ -name "*.webp" 2>/dev/null | wc -l)
+          WEBP_COUNT=$(find preview_image/ -maxdepth 1 -name "*.webp" 2>/dev/null | wc -l)
+          DUP_COUNT=$(find preview_image/duplicates/ -name "*.webp" 2>/dev/null | wc -l)
           echo "- Preview files remaining: $WEBP_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "- Files in duplicates/: $DUP_COUNT" >> $GITHUB_STEP_SUMMARY
