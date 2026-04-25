@@ -319,7 +319,8 @@ def scan_gdrive_structure(root_id: str) -> list:
         fid  = item["id"]
         mime = item["mimeType"]
         if mime == FOLDER_MIME:
-            if name.lower() == "final":
+            # Skip reserved folders — never process files inside these
+            if name.lower() in ("final", "duplicates"):
                 continue
             sub_items = gdrive_list_folder(fid)
             for sub in sub_items:
