@@ -89,7 +89,10 @@ VISION_MODEL = VISION_MODELS[0]  # kept for backward compat reference
 # ── Processing limits ─────────────────────────────────────────────────────────
 _env_count  = int(os.environ.get("FILE_COUNT", "0"))
 MAX_PER_RUN = _env_count if _env_count > 0 else 50
-AI_DELAY    = 8      # seconds between AI calls (increased to reduce quota pressure)
+AI_DELAY_BASE    = 3    # base seconds between AI calls (fast start)
+AI_DELAY_MAX     = 20   # max delay after repeated rate limits
+AI_DELAY_STEP    = 4    # increase delay by this on rate limit hit
+AI_DELAY_RECOVER = 1    # decrease delay by this on success
 
 # ── WebP preview settings ─────────────────────────────────────────────────────
 PREVIEW_MAX_SIZE   = 1280
@@ -1102,7 +1105,7 @@ def call_modelscope(jpg_b64: str, folder_hint: str = "", retries: int = 3) -> st
                         {"type": "text", "text": full_prompt},
                     ],
                 }],
-                "max_tokens": 1500,
+                "max_tokens": 900,
                 "temperature": 0.75,
             }
 
@@ -1189,7 +1192,7 @@ def generate_seo_fallback(filename: str, category: str) -> str:
             payload = {
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 1500,
+                "max_tokens": 900,
                 "temperature": 0.7,
             }
             for attempt in range(3):
@@ -1282,6 +1285,8 @@ def main():
     new_rows       = []
     errors         = 0
     webp_saved_locally = 0
+    ai_delay       = AI_DELAY_BASE   # adaptive delay — starts fast, backs off on quota hits
+    ai_quota_hits  = 0               # consecutive quota errors tracker
 
     for idx, (file_id, filename, category, category_folder_id) in enumerate(to_process):
         stem = Path(filename).stem
@@ -1305,7 +1310,8 @@ def main():
 
             # ── 3c. Save WebP: locally first, then GitHub API ─────────────────
             # FIX: Primary save is now LOCAL (committed by git step in workflow).
-            # API upload is secondary — if it fails, the local save still works.
+            # API upload is secondary — only if local save failed AND local file
+            # doesn't already exist.
             webp_filename = stem + ".webp"
             gh_path       = f"{PREVIEW_DIR}/{webp_filename}"
 
@@ -1314,11 +1320,14 @@ def main():
             if saved_locally:
                 webp_saved_locally += 1
 
-            # Secondary: also attempt GitHub API upload for immediate availability
-            uploaded_ok = github_upload_file(
-                BACKEND_REPO, gh_path, webp_bytes, backend_token,
-                f"ci: add preview {webp_filename}"
-            )
+            # Secondary: GitHub API upload ONLY if local save failed
+            # (Skip API check when local file exists — saves API call per file)
+            uploaded_ok = False
+            if not saved_locally:
+                uploaded_ok = github_upload_file(
+                    BACKEND_REPO, gh_path, webp_bytes, backend_token,
+                    f"ci: add preview {webp_filename}"
+                )
 
             # Preview URL is valid if saved locally OR API upload succeeded
             preview_url = f"{CDN_BASE}/{webp_filename}" if (saved_locally or uploaded_ok) else ""
@@ -1328,32 +1337,18 @@ def main():
                 log(f"    ⚠  WebP not saved — preview URL will be empty")
 
             # ── 3d. Encode a JPEG version for the AI call ────────────────────
+            # OPTIMIZATION: Reuse the already-processed image from WebP step
+            # instead of re-opening the raw PSD/PNG (saves heavy PSD parsing)
             log(f"    🤖 Preparing JPEG for AI vision call…")
             try:
-                if ext in (".psd", ".psb"):
-                    from psd_tools import PSDImage
-                    psd    = PSDImage.open(io.BytesIO(raw_bytes))
-                    ai_img = psd.composite() or PILImage.open(io.BytesIO(raw_bytes))
-                elif ext == ".png":
-                    ai_img = PILImage.open(io.BytesIO(raw_bytes))
-                    # Handle palette-mode and other unusual PNG modes
-                    if ai_img.mode == "P":
-                        ai_img = ai_img.convert("RGBA")
-                    if ai_img.mode == "LA":
-                        ai_img = ai_img.convert("RGBA")
-                else:
-                    ai_img = PILImage.open(io.BytesIO(raw_bytes))
+                # Use the WebP bytes (already resized + processed) as base
+                ai_img = PILImage.open(io.BytesIO(webp_bytes))
                 if ai_img.mode not in ("RGB", "RGBA"):
                     ai_img = ai_img.convert("RGB")
-                if max(ai_img.size) > 1280:
-                    ai_img = ai_img.copy()
-                    ai_img.thumbnail((1280, 1280), PILImage.LANCZOS)
                 if ai_img.mode == "RGBA":
                     bg = PILImage.new("RGB", ai_img.size, (255, 255, 255))
                     bg.paste(ai_img, mask=ai_img.split()[3])
                     ai_img = bg
-                elif ai_img.mode != "RGB":
-                    ai_img = ai_img.convert("RGB")
                 ai_buf = io.BytesIO()
                 ai_img.save(ai_buf, "JPEG", quality=85)
                 jpg_b64 = base64.b64encode(ai_buf.getvalue()).decode()
@@ -1418,6 +1413,11 @@ def main():
                 log(f"    🔗 DL: {'✅' if dl_url else '❌'}  Preview: {'✅' if preview_url else '❌'}")
             else:
                 log(f"    ⚠  AI vision returned empty — trying text-only fallback...")
+                # Increase delay on failure (likely rate limit)
+                ai_quota_hits += 1
+                if ai_quota_hits >= 2:
+                    ai_delay = min(AI_DELAY_MAX, ai_delay + AI_DELAY_STEP)
+                    log(f"    ⏱️  AI delay increased to {ai_delay:.0f}s (consecutive failures: {ai_quota_hits})")
                 ai_raw = generate_seo_fallback(filename, category)
                 if ai_raw:
                     title, tags, dims, desc = parse_response(ai_raw)
@@ -1453,13 +1453,30 @@ def main():
                 preview_url,                # Preview URL
             ])
 
-            time.sleep(AI_DELAY)
+            time.sleep(ai_delay)
+
+            # Adaptive delay: success → try to go faster (min AI_DELAY_BASE)
+            ai_quota_hits = 0
+            if ai_delay > AI_DELAY_BASE:
+                ai_delay = max(AI_DELAY_BASE, ai_delay - AI_DELAY_RECOVER)
+                log(f"    ⏱️  AI delay adjusted: {ai_delay:.0f}s (recovering)")
 
         except Exception as e:
             log(f"    ❌ Unhandled error for {filename}: {e}")
             traceback.print_exc()
             errors += 1
             continue
+
+        # ── Intermediate save: push designs.xlsx every 10 files ──────────
+        if len(new_rows) > 0 and len(new_rows) % 10 == 0:
+            log(f"\n💾 Intermediate save: {len(new_rows)} rows processed so far…")
+            try:
+                int_df = pd.DataFrame(new_rows, columns=XLSX_HEADERS)
+                int_final = pd.concat([df, int_df], ignore_index=True)
+                int_msg = f"ci: intermediate save {len(new_rows)} designs [{time.strftime('%H:%M UTC', time.gmtime())}]"
+                xlsx_sha = push_designs_xlsx(int_final, xlsx_sha, content_token, int_msg)
+            except Exception as save_err:
+                log(f"    ⚠  Intermediate save failed: {save_err} — will save at end")
 
     # ── STEP 4: Merge new rows ────────────────────────────────────────────────
     log(f"\n🔀 STEP 4 — Merging {len(new_rows)} new rows into designs.xlsx…")

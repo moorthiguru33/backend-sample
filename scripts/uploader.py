@@ -1,8 +1,8 @@
 """
 uploader.py – Upload files to Google Drive using OAuth2 (Refresh Token).
 
-KEY FIX — Cross-subfolder duplicate prevention
-===============================================
+KEY FIX — Cross-subfolder duplicate prevention + auto-move to duplicates/
+=========================================================================
 The original code only checked for duplicate names within the SPECIFIC
 target subfolder. This caused the same tamilpsd-XXXX name to appear in
 multiple subfolders when:
@@ -14,6 +14,10 @@ multiple subfolders when:
 Fix: On init, `preload_existing_names(parent_folder_id)` scans EVERY
 subfolder once and builds a global in-memory set `_known_names` of all
 tamilpsd-XXXX filenames that already exist anywhere on Drive.
+
+NEW: If the same filename is found in MULTIPLE subfolders, the extra
+copies are automatically moved to a `duplicates/` subfolder. This keeps
+Drive clean without losing any files.
 
 Every subsequent upload checks this global set first — if the name
 exists ANYWHERE (regardless of subfolder), the upload is skipped.
@@ -62,6 +66,9 @@ TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 # Regex to extract the numeric part from a tamilpsd-XXXX filename
 _TAMILPSD_RE = re.compile(r"^tamilpsd-(\d+)\.", re.IGNORECASE)
+
+# Reserved folder names to skip during scans
+_RESERVED_FOLDERS = {"duplicates", "final"}
 
 
 class DriveUploader:
@@ -140,6 +147,62 @@ class DriveUploader:
                 break
         return items
 
+    # ── Duplicate management ────────────────────────────────────────────────
+
+    def _find_or_create_duplicates_folder(self, parent_folder_id: str) -> str:
+        """Find or create a 'duplicates' subfolder inside parent_folder_id."""
+        cache_key = (parent_folder_id, "duplicates")
+        if cache_key in self._folder_cache:
+            return self._folder_cache[cache_key]
+
+        q = (
+            "name='duplicates' and '{}' in parents "
+            "and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        ).format(parent_folder_id)
+        result = self._svc.files().list(q=q, fields="files(id,name)").execute()
+        files = result.get("files", [])
+
+        if files:
+            folder_id = files[0]["id"]
+            log.info(f"📁 Found existing 'duplicates' folder: {folder_id}")
+        else:
+            metadata = {
+                "name":     "duplicates",
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents":  [parent_folder_id],
+            }
+            folder = self._svc.files().create(body=metadata, fields="id").execute()
+            folder_id = folder["id"]
+            log.info(f"📁 Created new 'duplicates' folder: {folder_id}")
+
+        self._folder_cache[cache_key] = folder_id
+        return folder_id
+
+    def _move_to_duplicates(self, file_id: str, file_name: str,
+                            parent_folder_id: str) -> bool:
+        """Move a duplicate file to the duplicates/ subfolder."""
+        try:
+            dup_folder_id = self._find_or_create_duplicates_folder(parent_folder_id)
+
+            # Get current parents
+            file_info = self._svc.files().get(
+                fileId=file_id, fields="parents"
+            ).execute()
+            current_parents = ",".join(file_info.get("parents", []))
+
+            # Move
+            self._svc.files().update(
+                fileId=file_id,
+                addParents=dup_folder_id,
+                removeParents=current_parents,
+                fields="id,parents",
+            ).execute()
+            log.info(f"  📦 Moved duplicate '{file_name}' → duplicates/")
+            return True
+        except Exception as exc:
+            log.warning(f"  ⚠️  Could not move duplicate '{file_name}': {exc}")
+            return False
+
     # ── Startup scan ───────────────────────────────────────────────────────
 
     def preload_existing_names(self, parent_folder_id: str) -> None:
@@ -152,20 +215,30 @@ class DriveUploader:
         Also pre-populates the folder cache so _find_or_create_subfolder
         never makes redundant API calls for already-known subfolders.
 
+        NEW: Detects cross-subfolder duplicates (same filename in multiple
+        subfolders) and auto-moves extras to a 'duplicates/' subfolder.
+
         Call this ONCE after creating DriveUploader, before the main loop.
         """
         log.info("🔍 Scanning Drive for existing tamilpsd files (all subfolders)…")
 
         total_files = 0
         max_num     = 0
+        duplicates_moved = 0
+
+        # Track: filename_lower → [(file_id, subfolder_name)]
+        # Used to detect same file in multiple subfolders
+        file_locations: dict[str, list[tuple[str, str]]] = {}
 
         # Root-level files
         for f in self._list_all_files_in_folder(parent_folder_id):
-            self._known_names.add(f["name"].lower())
+            name_lower = f["name"].lower()
+            self._known_names.add(name_lower)
             m = _TAMILPSD_RE.match(f["name"])
             if m:
                 max_num = max(max_num, int(m.group(1)))
             total_files += 1
+            file_locations.setdefault(name_lower, []).append((f["id"], "root"))
 
         # Every subfolder
         subfolders = self._list_subfolders(parent_folder_id)
@@ -173,24 +246,54 @@ class DriveUploader:
             sf_id   = sf["id"]
             sf_name = sf["name"]
 
+            # Skip reserved folders
+            if sf_name.lower() in _RESERVED_FOLDERS:
+                log.info(f"  📁 Skipping '{sf_name}' (reserved folder)")
+                continue
+
             # Pre-populate folder cache
             self._folder_cache[(parent_folder_id, sf_name)] = sf_id
             log.info(f"  📁 Scanning '{sf_name}' …")
 
             for f in self._list_all_files_in_folder(sf_id):
-                self._known_names.add(f["name"].lower())
+                name_lower = f["name"].lower()
+                self._known_names.add(name_lower)
                 m = _TAMILPSD_RE.match(f["name"])
                 if m:
                     max_num = max(max_num, int(m.group(1)))
                 total_files += 1
+                file_locations.setdefault(name_lower, []).append((f["id"], sf_name))
 
         self.max_counter = max_num
+
+        # ── Auto-move cross-subfolder duplicates ──────────────────────────
+        cross_dupes = {
+            name: locs for name, locs in file_locations.items()
+            if len(locs) > 1
+        }
+        if cross_dupes:
+            log.info(
+                f"\n⚠️  Found {len(cross_dupes)} filenames appearing in "
+                f"multiple subfolders — moving extras to duplicates/"
+            )
+            for name, locs in cross_dupes.items():
+                # Keep the FIRST occurrence, move the rest
+                keep_id, keep_folder = locs[0]
+                log.info(f"  🔸 '{name}' — keeping in [{keep_folder}], "
+                         f"moving {len(locs)-1} extra(s)")
+                for dup_id, dup_folder in locs[1:]:
+                    if self._move_to_duplicates(dup_id, name, parent_folder_id):
+                        duplicates_moved += 1
 
         log.info(
             f"✅ Drive scan complete: {total_files} files across "
             f"{len(subfolders)} subfolders | "
             f"Highest tamilpsd number on Drive: {max_num:04d}"
         )
+        if duplicates_moved > 0:
+            log.info(
+                f"📦 Moved {duplicates_moved} duplicate files to duplicates/ folder"
+            )
 
     # ── Internal folder management ─────────────────────────────────────────
 
