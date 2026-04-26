@@ -1288,6 +1288,7 @@ def main():
     webp_saved_locally = 0
     ai_delay       = AI_DELAY_BASE   # adaptive delay — starts fast, backs off on quota hits
     ai_quota_hits  = 0               # consecutive quota errors tracker
+    ai_fail_count  = 0               # tracks items where AI returned empty
 
     for idx, (file_id, filename, category, category_folder_id) in enumerate(to_process):
         stem = Path(filename).stem
@@ -1431,6 +1432,7 @@ def main():
                 else:
                     log(f"    ❌ Both vision and fallback failed — SEO fields will be empty")
                     cat_label = category or "Others"
+                    ai_fail_count += 1
 
             color_mode = "CMYK" if ext in (".psd", ".psb") else "RGB"
             software   = "Adobe Photoshop CC" if ext in (".psd", ".psb") else (
@@ -1468,16 +1470,29 @@ def main():
             errors += 1
             continue
 
-        # ── Intermediate save: push designs.xlsx every 10 files ──────────
-        if len(new_rows) > 0 and len(new_rows) % 10 == 0:
-            log(f"\n💾 Intermediate save: {len(new_rows)} rows processed so far…")
+        # ── Intermediate save: push designs.xlsx every 100 files OR if AI fails 3x ─
+        if len(new_rows) > 0 and (len(new_rows) % 100 == 0 or ai_fail_count >= 3):
+            stop_after_push = (ai_fail_count >= 3)
+            if stop_after_push:
+                log(f"\n💾 AI FAILURE TRIGGER: {ai_fail_count} failures. Pushing data and STOPPING action…")
+            else:
+                log(f"\n💾 Intermediate save: {len(new_rows)} rows processed so far…")
+
             try:
                 int_df = pd.DataFrame(new_rows, columns=XLSX_HEADERS)
                 int_final = pd.concat([df, int_df], ignore_index=True)
                 int_msg = f"ci: intermediate save {len(new_rows)} designs [{time.strftime('%H:%M UTC', time.gmtime())}]"
                 xlsx_sha = push_designs_xlsx(int_final, xlsx_sha, content_token, int_msg)
+                ai_fail_count = 0  # reset after successful push
+                
+                if stop_after_push:
+                    log("\n🛑 Action stopped due to 3 consecutive AI failures. Progress saved.")
+                    sys.exit(0)
             except Exception as save_err:
                 log(f"    ⚠  Intermediate save failed: {save_err} — will save at end")
+                if stop_after_push:
+                     log("🛑 Action stopped due to AI failure (save failed, but stopping anyway).")
+                     sys.exit(1)
 
     # ── STEP 4: Merge new rows ────────────────────────────────────────────────
     log(f"\n🔀 STEP 4 — Merging {len(new_rows)} new rows into designs.xlsx…")

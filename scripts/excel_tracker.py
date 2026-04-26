@@ -46,6 +46,7 @@ log = logging.getLogger(__name__)
 
 _COL_ORIGINAL = 1   # Column A
 _COL_RENAMED  = 2   # Column B
+_COL_URL      = 3   # Column C
 _HEADER_ROW   = 1
 
 _TAMILPSD_RE = re.compile(r"tamilpsd-(\d+)\.", re.IGNORECASE)
@@ -59,7 +60,7 @@ _CENTER       = Alignment(horizontal="center", vertical="center")
 
 class ExcelTracker:
     """
-    Persistent two-column Excel log.
+    Persistent three-column Excel log.
 
     All lookups are O(1) via in-memory sets; the file is only read once
     (at __init__) and written once per successful upload (add_entry).
@@ -71,6 +72,7 @@ class ExcelTracker:
         # In-memory sets for instant duplicate checks
         self._originals: set[str] = set()   # lowercase original filenames
         self._renamed:   set[str] = set()   # lowercase renamed filenames
+        self._urls:      set[str] = set()   # lowercase source URLs
 
         # Highest tamilpsd-N number seen in the sheet
         self.max_counter: int = 0
@@ -93,6 +95,8 @@ class ExcelTracker:
             for row in ws.iter_rows(min_row=_HEADER_ROW + 1, values_only=True):
                 orig    = str(row[0]).strip() if row[0] else ""
                 renamed = str(row[1]).strip() if row[1] else ""
+                url     = str(row[2]).strip() if (len(row) >= 3 and row[2]) else ""
+
                 if not orig and not renamed:
                     continue
 
@@ -103,6 +107,9 @@ class ExcelTracker:
                     m = _TAMILPSD_RE.search(renamed)
                     if m:
                         self.max_counter = max(self.max_counter, int(m.group(1)))
+                if url:
+                    self._urls.add(url.lower())
+
                 loaded += 1
 
             log.info(
@@ -122,20 +129,26 @@ class ExcelTracker:
         ws.cell(_HEADER_ROW, _COL_ORIGINAL, "Original File Name").font  = _HEADER_FONT
         ws.cell(_HEADER_ROW, _COL_ORIGINAL).fill                         = _HEADER_FILL
         ws.cell(_HEADER_ROW, _COL_ORIGINAL).alignment                    = _CENTER
+        
         ws.cell(_HEADER_ROW, _COL_RENAMED,  "Renamed File Name").font   = _HEADER_FONT
         ws.cell(_HEADER_ROW, _COL_RENAMED).fill                          = _HEADER_FILL
         ws.cell(_HEADER_ROW, _COL_RENAMED).alignment                     = _CENTER
 
+        ws.cell(_HEADER_ROW, _COL_URL,      "Source URL").font         = _HEADER_FONT
+        ws.cell(_HEADER_ROW, _COL_URL).fill                             = _HEADER_FILL
+        ws.cell(_HEADER_ROW, _COL_URL).alignment                        = _CENTER
+
         # Column widths
         ws.column_dimensions["A"].width = 45
         ws.column_dimensions["B"].width = 30
+        ws.column_dimensions["C"].width = 70
 
         # Freeze header row
         ws.freeze_panes = "A2"
 
         return wb
 
-    def _save(self, original: str, renamed: str) -> None:
+    def _save(self, original: str, renamed: str, url: str) -> None:
         """Append one row to the Excel file and save."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -158,10 +171,12 @@ class ExcelTracker:
 
         orig_cell    = ws.cell(next_row, _COL_ORIGINAL, original)
         renamed_cell = ws.cell(next_row, _COL_RENAMED,  renamed)
+        url_cell     = ws.cell(next_row, _COL_URL,      url)
 
         if fill:
             orig_cell.fill    = fill
             renamed_cell.fill = fill
+            url_cell.fill     = fill
 
         try:
             wb.save(self._path)
@@ -184,37 +199,47 @@ class ExcelTracker:
         """
         return renamed_filename.strip().lower() in self._renamed
 
-    def add_entry(self, original_filename: str, renamed_filename: str) -> None:
+    def is_url_done(self, url: str) -> bool:
+        """
+        Return True if this Source URL has already been processed.
+        """
+        if not url:
+            return False
+        return url.strip().lower() in self._urls
+
+    def add_entry(self, original_filename: str, renamed_filename: str, source_url: str = "") -> None:
         """
         Record a completed original → renamed mapping.
         Updates in-memory sets AND persists to disk immediately.
-        Safe to call even if the run crashes right after — next run will
-        see this entry and correctly skip the file.
         """
         orig_key    = original_filename.strip().lower()
         renamed_key = renamed_filename.strip().lower()
+        url_key     = source_url.strip().lower()
 
-        # Guard: don't write duplicates into the sheet itself
-        if orig_key in self._originals or renamed_key in self._renamed:
-            log.debug(
-                f"Excel tracker: entry already exists — "
-                f"orig={original_filename!r} renamed={renamed_filename!r}"
-            )
-            return
+        # Guard: don't write duplicates into the sheet itself (check renamed/url)
+        # Note: multiple originals might map to same URL, but renamed is always unique.
+        if renamed_key and renamed_key in self._renamed:
+             log.debug(f"Excel tracker: renamed name already exists: {renamed_filename}")
+             return
 
-        self._originals.add(orig_key)
-        self._renamed.add(renamed_key)
+        if orig_key:
+            self._originals.add(orig_key)
+        if renamed_key:
+            self._renamed.add(renamed_key)
+        if url_key:
+            self._urls.add(url_key)
 
         m = _TAMILPSD_RE.search(renamed_filename)
         if m:
             self.max_counter = max(self.max_counter, int(m.group(1)))
 
-        self._save(original_filename.strip(), renamed_filename.strip())
-        log.info(f"📊 Excel logged: {original_filename!r} → {renamed_filename!r}")
+        self._save(original_filename.strip(), renamed_filename.strip(), source_url.strip())
+        log.info(f"📊 Excel logged: {original_filename!r} → {renamed_filename!r} (URL: {source_url[:40]}...)")
 
     def stats(self) -> str:
         return (
             f"{len(self._originals)} originals tracked | "
             f"{len(self._renamed)} renamed tracked | "
+            f"{len(self._urls)} URLs tracked | "
             f"max counter: tamilpsd-{self.max_counter:04d}"
         )

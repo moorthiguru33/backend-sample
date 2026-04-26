@@ -311,6 +311,7 @@ def main() -> None:
     log.info(f"📋 Job tracker:    {job_tracker.stats()}")
     log.info(f"📊 Rename tracker: {rename_tracker.stats()}")
 
+    log.info("🔄 Pre-loading Google Drive state to prevent ANY duplicate uploads…")
     uploader.preload_existing_names(GDRIVE_PSD_FOLDER)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -350,6 +351,20 @@ def main() -> None:
         pending = job_tracker.get_pending()
 
     log.info(f"📋 Ready to process: {job_tracker.stats()}")
+
+    # ── Final check: Match jobs against rename_log ────────────────────────
+    # This avoids processing items that were completed but not marked in jobs.xlsx
+    if pending:
+        log.info("🔍 Matching pending jobs against rename_log.xlsx for absolute sync…")
+        synced = 0
+        for item in pending:
+            url = item.get("download_url", "")
+            if rename_tracker.is_url_done(url):
+                job_tracker.mark_completed(url)
+                synced += 1
+        if synced > 0:
+            log.info(f"✅ Deep Sync: marked {synced} items as Completed based on rename_log.xlsx")
+            pending = job_tracker.get_pending()
 
     if not pending:
         log.info("Nothing pending — exiting.")
@@ -402,6 +417,13 @@ def main() -> None:
         # ── SKIP ① — Already Completed in jobs.xlsx ──────────────────────
         if job_tracker.is_completed(download_url):
             log.info(f"  ⏭  Already Completed (jobs.xlsx) → skip: {download_url[:60]}")
+            processed_this_run += 1
+            continue
+
+        # ── SKIP ①b — Already in rename_log.xlsx (URL match) ─────────────
+        if rename_tracker.is_url_done(download_url):
+            log.info(f"  ⏭  Already in rename_log.xlsx (URL match) → mark Completed: {download_url[:60]}")
+            job_tracker.mark_completed(download_url)
             processed_this_run += 1
             continue
 
@@ -467,8 +489,8 @@ def main() -> None:
                 client_secret=GOOGLE_CLIENT_SECRET,
                 refresh_token=GOOGLE_REFRESH_TOKEN,
             )
-            if not archive:
-                log.error("  Download failed — marking Error")
+            if not archive or not archive.exists() or archive.stat().st_size < 1024:
+                log.error(f"  Download failed or file corrupted (size: {archive.stat().st_size if archive and archive.exists() else 0} bytes) — marking Error")
                 job_tracker.mark_error(download_url)
                 errors_this_run += 1
                 continue
@@ -478,6 +500,8 @@ def main() -> None:
             log.info(f"  Archive: {len(original_names)} PSD/TIF/PNG file(s) inside")
 
             # ── SKIP ② — ALL files already in rename_log.xlsx ────────────
+            # This is also checked inside upload_to_category, but we check here
+            # to avoid downloading the large archive if possible.
             if original_names and all(
                 rename_tracker.is_original_done(n) for n in original_names
             ):
@@ -519,6 +543,7 @@ def main() -> None:
                         category=category,
                         excel_tracker=rename_tracker,
                         original_name=orig_name,
+                        source_url=download_url,
                     )
                     if not result_info.get("skipped"):
                         uploaded_count += 1
@@ -530,7 +555,13 @@ def main() -> None:
             state.set("file_counter", file_counter)
             state.save()
 
-            job_tracker.mark_completed(download_url)
+            if uploaded_count > 0 or not renamed_files:
+                job_tracker.mark_completed(download_url)
+                log.info(f"  ✅ Done ({processed_this_run+1} this run) [{category}] uploaded={uploaded_count}")
+            else:
+                log.warning(f"  ⚠️  No files uploaded for {download_url} — check logs")
+                job_tracker.mark_error(download_url)
+            
             processed_this_run += 1
 
             log.info(

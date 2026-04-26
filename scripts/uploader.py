@@ -342,6 +342,7 @@ class DriveUploader:
         *,
         excel_tracker=None,
         original_name: str = "",
+        source_url: str = "",
     ) -> dict:
         """
         Upload file_path into a category subfolder inside parent_folder_id.
@@ -353,10 +354,11 @@ class DriveUploader:
         category          : subfolder name inside parent_folder_id
         excel_tracker     : ExcelTracker instance (optional but strongly recommended)
         original_name     : original filename from source archive
-                            (stored in Excel's "Original File Name" column)
+        source_url        : source URL from forpsd.com
 
         Duplicate-check order
         ---------------------
+          0. Excel — URL already logged? → skip (zero API calls)
           1. Excel — original name already logged? → skip (zero API calls)
           2. Excel — renamed name already logged?  → skip (zero API calls)
           3. Global in-memory Drive set            → skip (zero API calls)
@@ -366,6 +368,11 @@ class DriveUploader:
         path     = Path(file_path)
         name     = path.name
         category = category.strip() or "uncategorized"
+
+        # ── 0. Excel: URL check ───────────────────────────────────────────
+        if excel_tracker and source_url and excel_tracker.is_url_done(source_url):
+            log.info(f"⏭  URL already marked done in Excel — skipping '{name}'")
+            return {"name": name, "skipped": True, "reason": "excel_url", "category": category}
 
         # ── 1. Excel: original name check ─────────────────────────────────
         if excel_tracker and original_name:
@@ -393,7 +400,7 @@ class DriveUploader:
             )
             # Back-fill Excel so future runs skip via Excel (faster, no Drive scan needed)
             if excel_tracker and not excel_tracker.is_renamed_used(name):
-                excel_tracker.add_entry(original_name or name, name)
+                excel_tracker.add_entry(original_name or name, name, source_url)
             return {"name": name, "skipped": True, "reason": "drive_global", "category": category}
 
         # ── 4. Resolve category subfolder ─────────────────────────────────
@@ -410,7 +417,7 @@ class DriveUploader:
             self._known_names.add(name.lower())
             # Back-fill Excel
             if excel_tracker and not excel_tracker.is_renamed_used(name):
-                excel_tracker.add_entry(original_name or name, name)
+                excel_tracker.add_entry(original_name or name, name, source_url)
             return {"name": name, "skipped": True, "reason": "drive_local", "category": category}
 
         # ── 6. Upload ──────────────────────────────────────────────────────
@@ -434,7 +441,7 @@ class DriveUploader:
             # Log to Excel immediately — before printing success, so a crash
             # here still leaves the entry in Excel for the next run.
             if excel_tracker:
-                excel_tracker.add_entry(original_name or name, name)
+                excel_tracker.add_entry(original_name or name, name, source_url)
 
             log.info(
                 f"✅ Uploaded: {response.get('name')} "
@@ -446,10 +453,14 @@ class DriveUploader:
             log.error(f"Drive upload error for {name}: {exc}")
             raise
 
-    def upload(self, file_path, folder_id: str, *, excel_tracker=None, original_name: str = "") -> dict:
+    def upload(self, file_path, folder_id: str, *, excel_tracker=None, original_name: str = "", source_url: str = "") -> dict:
         """Legacy upload — uploads directly into folder_id (no subfolder)."""
         path = Path(file_path)
         name = path.name
+
+        if excel_tracker and source_url and excel_tracker.is_url_done(source_url):
+            log.info(f"⏭  URL already marked done in Excel — skipping '{name}'")
+            return {"name": name, "skipped": True, "reason": "excel_url"}
 
         if excel_tracker and original_name and excel_tracker.is_original_done(original_name):
             log.info(f"⏭  Original '{original_name}' already in Excel log — skipping '{name}'")
@@ -472,7 +483,7 @@ class DriveUploader:
             log.info(f"⏭  Already on Drive, skipping: {name}")
             self._known_names.add(name.lower())
             if excel_tracker and not excel_tracker.is_renamed_used(name):
-                excel_tracker.add_entry(original_name or name, name)
+                excel_tracker.add_entry(original_name or name, name, source_url)
             return {"name": name, "skipped": True}
 
         metadata = {"name": name, "parents": [folder_id]}
@@ -492,7 +503,7 @@ class DriveUploader:
             self._known_names.add(name.lower())
 
             if excel_tracker:
-                excel_tracker.add_entry(original_name or name, name)
+                excel_tracker.add_entry(original_name or name, name, source_url)
 
             log.info(f"✅ Uploaded: {response.get('name')} → {response.get('webViewLink')}")
             return response
